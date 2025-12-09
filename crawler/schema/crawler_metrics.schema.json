@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.org/gpumon/crawler_metrics.schema.json",
+  "title": "GPUmon Crawler Metrics",
+  "description": "Schema for JSON records emitted by the gpumon crawler (per-GPU and per-process metrics).",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "timestamp": { "type": "string", "description": "ISO-8601 UTC timestamp of the sample window end" },
+    "hostname": { "type": "string" },
+    "gpuId": { "type": "string", "description": "NVML UUID or 'unknown'" },
+    "gpuName": { "type": "string", "description": "GPU product name or 'unknown'" },
+    "metricType": { "type": "string", "enum": ["gpu", "process"] }
+  },
+  "required": ["timestamp", "hostname", "gpuId", "gpuName", "metricType"],
+  "oneOf": [
+    {
+      "title": "GPU metrics",
+      "properties": {
+        "metricType": { "const": "gpu" },
+        "totalMemoryMiB": { "type": "integer", "minimum": 0 },
+        "usedTotalMemoryMiB": { "type": "integer", "minimum": 0 },
+        "freeMemoryMiB": { "type": "integer", "minimum": 0 },
+        "gpuUtilPercent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "memUtilPercent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "temperatureCelsius": { "type": "integer" },
+        "powerMilliwatts": { "type": "integer", "minimum": 0 }
+      },
+      "required": [
+        "metricType",
+        "totalMemoryMiB",
+        "usedTotalMemoryMiB",
+        "freeMemoryMiB",
+        "gpuUtilPercent",
+        "memUtilPercent",
+        "temperatureCelsius",
+        "powerMilliwatts"
+      ]
+    },
+    {
+      "title": "Process metrics",
+      "properties": {
+        "metricType": { "const": "process" },
+        "pid": { "type": "integer", "minimum": 0 },
+        "processName": { "type": "string" },
+        "processUsedMemoryMiB": { "type": "integer", "minimum": 0 },
+        "appName": { "type": "string" },
+        "kernelName": { "type": "string" },
+        "tag": { "type": "string" },
+        "scopeMemDeltaMiB": { "type": "integer" }
+      },
+      "required": ["metricType", "pid", "processName", "processUsedMemoryMiB"]
+    }
+  ]
+}
