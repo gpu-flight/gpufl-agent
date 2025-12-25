@@ -1,0 +1,11 @@
+{
+  "source": {
+    "folder": "/var/log/gpuflight",
+    "filePrefix": "production_app"
+  },
+  "publisher": {
+    "type": "kafka",
+    "bootstrapServers": "kafka-broker-1:9092,kafka-broker-2:9092",
+    "topicPrefix": "gpu-metrics-v1"
+  }
+}
