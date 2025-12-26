@@ -1,7 +1,7 @@
 {
   "source": {
-    "folder": "C:\\Users\\myoun\\Documents\\sources\\gpumon\\gpumon-client\\cmake-build-debug\\example\\cuda\\",
-    "filePrefix": "gpufl"
+    "folder": "./",
+    "filePrefix": "gfl_block.log"
   },
   "publisher": {
     "type": "http",

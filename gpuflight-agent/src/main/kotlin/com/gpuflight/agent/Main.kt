@@ -14,11 +14,11 @@ fun main(args: Array<String>) = runBlocking {
     val env = parseEnvArg(args) ?: "local"
     val config = loadConfig(env)
     val publisher = PublisherFactory.create(config.publisher)
-    val cursorMgr = CursorManager(File("cursor.json"))
 
     val logTypes = listOf("kernel", "scope", "system")
     val source = config.source
     val folder = File(source.folder)
+    val cursorMgr = CursorManager(File("./cursor.json"))
 
     val jobs = logTypes.map { type ->
         launch(Dispatchers.IO) {
