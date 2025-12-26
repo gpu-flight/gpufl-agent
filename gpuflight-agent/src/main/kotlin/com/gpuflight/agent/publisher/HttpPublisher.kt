@@ -21,6 +21,7 @@ class HttpPublisher(
 
     override suspend fun publish(topic: String, key: String, message: String) {
         // Networking must happen on IO dispatcher
+        println("Connecting to ${config.endpointUrl}...")
         withContext(Dispatchers.IO) {
             val requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(config.endpointUrl))

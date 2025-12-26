@@ -36,7 +36,7 @@ class LogTailer(
             val file = getLogFile(currentIndex)
 
             if (!file.exists()) {
-                println("[$logType] Waiting for file: ${file.name}...")
+                println("[$logType] Waiting for file: ${file.absolutePath}...")
                 delay(2000)
 
                 if (checkForNewerFile(currentIndex)) {
@@ -55,19 +55,21 @@ class LogTailer(
 
                 var fileIsDone = false
 
-                while (coroutineContext.isActive && !fileIsDone) {
+                while (currentCoroutineContext().isActive && !fileIsDone) {
                     val fileLen = file.length()
-
+                    println("[$logType] File length: $fileLen, current offset: $currentOffset")
                     if (fileLen > currentOffset) {
                         var line = reader.readLine()
                         while(line != null) {
                             if (line.isNotBlank()) {
                                 val payload = processLine(line)
+                                println("payload: $payload")
                                 if (payload != null) emit(payload)
                             }
                             currentOffset = reader.filePointer
                             line = reader.readLine()
                         }
+                        println("[$logType] Updated cursor for ${streamKey}: offset=$currentOffset")
                         cursorMgr.update(streamKey, currentIndex, currentOffset)
                     } else {
                         val nextFile = getLogFile(currentIndex + 1)
@@ -90,7 +92,7 @@ class LogTailer(
     private fun getLogFile(index: Int): File {
         // format: [prefix].log.[type].[index].log
         // e.g. gpufl.log.kernel.0.log
-        return File(folder, "$filePrefix.log.$logType.$index.log")
+        return File(folder, "$filePrefix.$logType.$index.log")
     }
 
     private fun checkForNewerFile(index: Int): Boolean {
@@ -100,6 +102,7 @@ class LogTailer(
     private fun processLine(rawLine: String): String? {
         return try {
             val innerJson = json.parseToJsonElement(rawLine)
+            println("innerJson: $innerJson")
 
             val wrapper = LogWrapper(
                 src = logType,
@@ -109,6 +112,7 @@ class LogTailer(
 
             json.encodeToString(wrapper)
         } catch (e: Exception) {
+            println("Failed to parse line: ${e.message}")
             null
         }
     }

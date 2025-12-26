@@ -8,11 +8,15 @@ class CursorManager(private val cursorFile: File) {
     val state: CursorState = load()
 
     private fun load(): CursorState {
-        if (!cursorFile.exists()) return CursorState()
+        if (!cursorFile.exists()) {
+            cursorFile.createNewFile()
+            return CursorState()
+        }
         return try {
             json.decodeFromString<CursorState>(cursorFile.readText())
         } catch (e: Exception) {
             println("Corrupt cursor file. Starting fresh.")
+            cursorFile.createNewFile()
             CursorState()
         }
     }
@@ -30,7 +34,13 @@ class CursorManager(private val cursorFile: File) {
     }
 
     fun update(streamKey: String, fileIndex: Int, offset: Long) {
-        state.streams[streamKey] = CursorPosition(fileIndex, offset)
+        val newPos = CursorPosition(fileIndex, offset)
+        val oldPos = state.streams[streamKey]
+
+        if(newPos != oldPos) {
+            state.streams[streamKey] = newPos
+            save()
+        }
     }
 
     fun get(streamKey: String): CursorPosition {
