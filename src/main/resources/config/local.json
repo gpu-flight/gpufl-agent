@@ -1,0 +1,11 @@
+{
+  "source": {
+    "folder": "C:\\Users\\myoun\\Documents\\sources\\gpumon\\gpumon-client\\cmake-build-debug\\example\\cuda\\",
+    "filePrefix": "gfl_block.log"
+  },
+  "publisher": {
+    "type": "http",
+    "endpointUrl": "http://localhost:8080/api/v1/events/",
+    "authToken": ""
+  }
+}

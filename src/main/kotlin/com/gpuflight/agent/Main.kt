@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import kotlin.system.exitProcess
@@ -24,7 +25,12 @@ fun main(args: Array<String>) = runBlocking {
         launch(Dispatchers.IO) {
             val tailer = LogTailer(folder, source.filePrefix, type, cursorMgr)
 
-            tailer.tail().collect { cleanJson -> publisher.publish("gpu-trace-events", type, cleanJson)}
+            tailer.tail().collect { logWrapper ->
+
+
+                val payloadStr = json.encodeToString(payload)
+                publisher.publish("gpu-trace-events", type, logWrapper)
+            }
         }
     }
 
