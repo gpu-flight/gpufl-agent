@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.io.RandomAccessFile
 import kotlin.coroutines.coroutineContext
@@ -27,7 +29,7 @@ class LogTailer(
 
     private val streamKey = "$filePrefix.$logType"
 
-    fun tail(): Flow<String> = flow {
+    fun tail(): Flow<LogWrapper> = flow {
         var (currentIndex, currentOffset) = cursorMgr.get(streamKey)
 
         println("[$logType] Starting at File Index $currentIndex, Offset: $currentOffset")
@@ -63,7 +65,6 @@ class LogTailer(
                         while(line != null) {
                             if (line.isNotBlank()) {
                                 val payload = processLine(line)
-                                println("payload: $payload")
                                 if (payload != null) emit(payload)
                             }
                             currentOffset = reader.filePointer
@@ -99,18 +100,19 @@ class LogTailer(
         return getLogFile(index + 1).exists()
     }
 
-    private fun processLine(rawLine: String): String? {
+    private fun processLine(rawLine: String): LogWrapper? {
         return try {
             val innerJson = json.parseToJsonElement(rawLine)
-            println("innerJson: $innerJson")
+            val type = innerJson.jsonObject["type"]?.jsonPrimitive?.content ?: "unknown"
 
             val wrapper = LogWrapper(
                 src = logType,
                 timestamp = System.currentTimeMillis(),
-                data = innerJson
+                data = innerJson,
+                type = type
             )
 
-            json.encodeToString(wrapper)
+            wrapper
         } catch (e: Exception) {
             println("Failed to parse line: ${e.message}")
             null
