@@ -5,8 +5,9 @@ import kotlinx.serialization.json.JsonElement
 
 @Serializable
 data class LogWrapper(
-    val src: String,
-    val timestamp: Long,
-    val data: JsonElement,
-    val type: String
+    val agentSendingTime: Long,
+    val data: String,
+    val type: String,
+    val hostname: String,
+    val ipAddr: String
 )
