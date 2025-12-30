@@ -6,14 +6,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import kotlin.system.exitProcess
 
 fun main(args: Array<String>) = runBlocking {
-    val env = parseEnvArg(args) ?: "local"
-    val config = loadConfig(env)
+    val configPath = parseConfigArg(args)
+    val config = if (configPath != null) {
+        loadExternalConfig(configPath)
+    } else {
+        val env = parseEnvArg(args) ?: "local"
+        loadConfig(env)
+    }
     val publisher = PublisherFactory.create(config.publisher)
 
     val logTypes = listOf("kernel", "scope", "system")
@@ -26,9 +30,6 @@ fun main(args: Array<String>) = runBlocking {
             val tailer = LogTailer(folder, source.filePrefix, type, cursorMgr)
 
             tailer.tail().collect { logWrapper ->
-
-
-                val payloadStr = json.encodeToString(payload)
                 publisher.publish("gpu-trace-events", type, logWrapper)
             }
         }
@@ -46,7 +47,36 @@ fun parseEnvArg(args: Array<String>): String? {
         }
     }
 
-    return args.firstOrNull { !it.startsWith("--")}
+    return args.firstOrNull { !it.startsWith("--") }
+}
+
+fun parseConfigArg(args: Array<String>): String? {
+    for (arg in args) {
+        if (arg.startsWith("--config=")) {
+            return arg.substring("--config=".length)
+        }
+    }
+    return null
+}
+
+fun loadExternalConfig(path: String): AgentConfig {
+    val file = File(path)
+    if (!file.exists()) {
+        System.err.println("❌ Config file not found: '$path'")
+        exitProcess(1)
+    }
+
+    try {
+        val jsonText = file.readText()
+        val json = Json {
+            ignoreUnknownKeys = true
+            classDiscriminator = "type"
+        }
+        return json.decodeFromString<AgentConfig>(jsonText)
+    } catch (e: Exception) {
+        System.err.println("Failed to parse config file: ${e.message}")
+        exitProcess(1)
+    }
 }
 
 fun loadConfig(env: String): AgentConfig {

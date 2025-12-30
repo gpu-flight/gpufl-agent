@@ -26,7 +26,7 @@ class HttpPublisher(
         // Networking must happen on IO dispatcher
         println("Connecting to ${config.endpointUrl}...")
         withContext(Dispatchers.IO) {
-            val message = json.encodeToString(log.data)
+            val message = json.encodeToString(log)
 
             val requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(config.endpointUrl + log.type))

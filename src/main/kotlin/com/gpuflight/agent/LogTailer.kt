@@ -70,7 +70,6 @@ class LogTailer(
                             currentOffset = reader.filePointer
                             line = reader.readLine()
                         }
-                        println("[$logType] Updated cursor for ${streamKey}: offset=$currentOffset")
                         cursorMgr.update(streamKey, currentIndex, currentOffset)
                     } else {
                         val nextFile = getLogFile(currentIndex + 1)
@@ -103,13 +102,16 @@ class LogTailer(
     private fun processLine(rawLine: String): LogWrapper? {
         return try {
             val innerJson = json.parseToJsonElement(rawLine)
+
             val type = innerJson.jsonObject["type"]?.jsonPrimitive?.content ?: "unknown"
+            val inet = java.net.InetAddress.getLocalHost()
 
             val wrapper = LogWrapper(
-                src = logType,
-                timestamp = System.currentTimeMillis(),
-                data = innerJson,
-                type = type
+                agentSendingTime = System.currentTimeMillis(),
+                data = rawLine,
+                type = type,
+                hostname = inet.hostName ?: "unknown",
+                ipAddr = inet.hostAddress ?: "unknown"
             )
 
             wrapper
