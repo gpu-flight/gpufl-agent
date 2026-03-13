@@ -23,15 +23,13 @@ class HttpPublisher(
         .build()
 
     override suspend fun publish(topic: String, key: String, log: LogWrapper) {
-        // Networking must happen on IO dispatcher
-        println("Connecting to ${config.endpointUrl}...")
         withContext(Dispatchers.IO) {
+            val url = config.endpointUrl + log.type
             val message = json.encodeToString(log)
 
             val requestBuilder = HttpRequest.newBuilder()
-                .uri(URI.create(config.endpointUrl + log.type))
+                .uri(URI.create(url))
                 .header("Content-Type", "application/json")
-                // Custom headers to help backend route the data
                 .header("X-Topic", topic)
                 .header("X-Key", key)
                 .POST(HttpRequest.BodyPublishers.ofString(message))
@@ -44,10 +42,10 @@ class HttpPublisher(
                 val response = client.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString())
 
                 if (response.statusCode() !in 200..299) {
-                    println("HTTP Publish failed: ${response.statusCode()} - ${response.body()}")
+                    println("HTTP Publish failed [$url]: ${response.statusCode()} - ${response.body()}")
                 }
             } catch (e: Exception) {
-                println("HTTP Connection error: ${e.message}")
+                println("HTTP Connection error [$url]: ${e.toString()}")
             }
         }
     }
