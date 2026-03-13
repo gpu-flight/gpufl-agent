@@ -1,7 +1,7 @@
 {
   "source": {
-    "folder": "C:\\Users\\myoun\\Documents\\sources\\gpumon\\gpumon-client\\cmake-build-debug\\example\\cuda\\",
-    "filePrefix": "gfl_block.log"
+    "folder": "/home/myounghoshin/sources/gpufl-client/cmake-build-debug/example/cuda",
+    "filePrefix": "sass_divergence"
   },
   "publisher": {
     "type": "http",

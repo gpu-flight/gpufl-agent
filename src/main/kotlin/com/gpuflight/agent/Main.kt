@@ -20,7 +20,7 @@ fun main(args: Array<String>) = runBlocking {
     }
     val publisher = PublisherFactory.create(config.publisher)
 
-    val logTypes = listOf("kernel", "scope", "system")
+    val logTypes = listOf("device", "scope", "system")
     val source = config.source
     val folder = File(source.folder)
     val cursorMgr = CursorManager(File("./cursor.json"))
