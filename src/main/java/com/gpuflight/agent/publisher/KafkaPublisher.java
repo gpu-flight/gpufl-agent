@@ -1,0 +1,40 @@
+package com.gpuflight.agent.publisher;
+
+import com.gpuflight.agent.config.JsonSettings;
+import com.gpuflight.agent.model.LogWrapper;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+
+import java.util.Properties;
+
+public class KafkaPublisher implements Publisher {
+    private final KafkaProducer<String, String> producer;
+
+    public KafkaPublisher(String bootstrapServers) {
+        var props = new Properties();
+        props.put("bootstrap.servers", bootstrapServers);
+        props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+        props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+        props.put("compression.type", "snappy");
+        props.put("linger.ms", "100");
+        this.producer = new KafkaProducer<>(props);
+    }
+
+    @Override
+    public void publish(String topic, String key, LogWrapper log) {
+        try {
+            String message = JsonSettings.MAPPER.writeValueAsString(log.data());
+            // producer.send() is async and only blocks when the internal buffer is full.
+            // Blocking on a virtual thread is fine — carrier thread parks, not blocks.
+            producer.send(new ProducerRecord<>(topic, key, message));
+        } catch (Exception e) {
+            System.out.println("Kafka publish error: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public void close() {
+        producer.flush();
+        producer.close();
+    }
+}
