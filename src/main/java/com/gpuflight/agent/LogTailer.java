@@ -1,6 +1,6 @@
 package com.gpuflight.agent;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 import com.gpuflight.agent.config.JsonSettings;
 import com.gpuflight.agent.model.LogWrapper;
 import com.gpuflight.agent.publisher.Publisher;
