@@ -1,0 +1,49 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'com.gradleup.shadow' version '9.3.2'
+}
+
+group = 'com.gpuflight'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+application {
+    mainClass = 'com.gpuflight.agent.Main'
+}
+
+dependencies {
+    implementation 'tools.jackson.core:jackson-databind:3.1.0'
+    implementation 'tools.jackson.core:jackson-module-jaxb-annotations:3.1.0'
+    implementation 'org.apache.kafka:kafka-clients:3.7.0'
+    implementation 'org.slf4j:slf4j-simple:2.0.12'
+    implementation 'software.amazon.awssdk:s3:2.29.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs << '-parameters'
+}
+
+shadowJar {
+    // Default classifier 'all' → build/libs/gpuflight-agent-1.0-SNAPSHOT-all.jar
+    mergeServiceFiles()
+}
+
+// Ensure distZip/distTar/startScripts see the shadow jar before packaging
+tasks.named('distZip') { dependsOn shadowJar }
+tasks.named('distTar') { dependsOn shadowJar }
+tasks.named('startScripts') { dependsOn shadowJar }
+
+test {
+    useJUnitPlatform()
+}
