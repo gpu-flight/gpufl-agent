@@ -2,6 +2,7 @@ plugins {
     id 'java'
     id 'application'
     id 'com.gradleup.shadow' version '9.3.2'
+    id 'jacoco'
 }
 
 group = 'com.gpuflight'
@@ -22,12 +23,13 @@ application {
 }
 
 dependencies {
-    implementation 'tools.jackson.core:jackson-databind:3.1.0'
-    implementation 'tools.jackson.core:jackson-module-jaxb-annotations:3.1.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.0'
+    implementation 'com.fasterxml.jackson.module:jackson-module-parameter-names:2.18.0'
     implementation 'org.apache.kafka:kafka-clients:3.7.0'
     implementation 'org.slf4j:slf4j-simple:2.0.12'
     implementation 'software.amazon.awssdk:s3:2.29.0'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -46,4 +48,41 @@ tasks.named('startScripts') { dependsOn shadowJar }
 
 test {
     useJUnitPlatform()
+    finalizedBy jacocoTestReport
 }
+
+jacoco {
+    toolVersion = '0.8.13'
+}
+
+// Classes that require live external services (Kafka broker, S3) — excluded from coverage.
+def jacocoExcludes = [
+    '**/LogArchiver.class',
+    '**/KafkaPublisher.class'
+]
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+    classDirectories.setFrom(
+        sourceSets.main.output.classesDirs.asFileTree.matching { exclude jacocoExcludes }
+    )
+}
+
+jacocoTestCoverageVerification {
+    classDirectories.setFrom(
+        sourceSets.main.output.classesDirs.asFileTree.matching { exclude jacocoExcludes }
+    )
+    violationRules {
+        rule {
+            limit {
+                minimum = 0.80
+            }
+        }
+    }
+}
+
+check.dependsOn jacocoTestCoverageVerification

@@ -18,6 +18,7 @@ public class CursorState {
         this.streams = streams != null ? new ConcurrentHashMap<>(streams) : new ConcurrentHashMap<>();
     }
 
+    @JsonProperty("streams")
     public Map<String, CursorPosition> streams() {
         return streams;
     }
