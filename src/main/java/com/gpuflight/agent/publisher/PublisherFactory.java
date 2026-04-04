@@ -7,7 +7,7 @@ import com.gpuflight.agent.config.PublisherConfig;
 public class PublisherFactory {
     public static Publisher create(PublisherConfig config) {
         return switch (config) {
-            case KafkaConfig kafka -> new KafkaPublisher(kafka.bootstrapServers());
+            case KafkaConfig kafka -> new KafkaPublisher(kafka);
             case HttpConfig http  -> new HttpPublisher(http);
         };
     }

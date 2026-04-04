@@ -29,15 +29,17 @@ public class LogTailer {
     private final File folder;
     private final String filePrefix;
     private final String logType;
+    private final String topicPrefix;
     private final CursorManager cursorMgr;
     private final BlockingQueue<Path> consumedFilesQueue; // nullable
     private final String streamKey;
 
-    public LogTailer(File folder, String filePrefix, String logType,
+    public LogTailer(File folder, String filePrefix, String logType, String topicPrefix,
                      CursorManager cursorMgr, BlockingQueue<Path> consumedFilesQueue) {
         this.folder = folder;
         this.filePrefix = filePrefix;
         this.logType = logType;
+        this.topicPrefix = topicPrefix;
         this.cursorMgr = cursorMgr;
         this.consumedFilesQueue = consumedFilesQueue;
         this.streamKey = filePrefix + "." + logType;
@@ -100,7 +102,7 @@ public class LogTailer {
                             if (!line.isBlank()) {
                                 LogWrapper wrapper = processLine(line);
                                 if (wrapper != null) {
-                                    publisher.publish("gpu-trace-events", logType, wrapper);
+                                    publisher.publish(topicPrefix, logType, wrapper);
                                 }
                             }
                             offset = reader.getFilePointer();

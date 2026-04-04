@@ -1,11 +1,12 @@
 {
   "source": {
-    "folder": "/home/myounghoshin/sources/gpufl-client/cmake-build-debug/example/cuda",
-    "filePrefix": "sass_divergence"
+    "folder": "",
+    "filePrefix": "session"
   },
   "publisher": {
     "type": "http",
-    "endpointUrl": "http://localhost:8080/api/v1/events/",
-    "authToken": "gpfl_O9NuoDQNXnzbcky0j7zykbWwOFMZOx04"
+    "endpointUrl": "",
+    "authToken": ""
   }
 }
+

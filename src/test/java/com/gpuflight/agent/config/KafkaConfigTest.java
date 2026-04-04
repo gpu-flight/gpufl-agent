@@ -8,21 +8,28 @@ class KafkaConfigTest {
 
     @Test
     void nullTopicPrefix_defaultsToGpuTrace() {
-        KafkaConfig config = new KafkaConfig("localhost:9092", null, null);
+        KafkaConfig config = new KafkaConfig("localhost:9092", null, null, 0);
         assertEquals("gpu-trace", config.topicPrefix());
     }
 
     @Test
     void nullCompression_defaultsToSnappy() {
-        KafkaConfig config = new KafkaConfig("localhost:9092", null, null);
+        KafkaConfig config = new KafkaConfig("localhost:9092", null, null, 0);
         assertEquals("snappy", config.compression());
     }
 
     @Test
+    void zeroLingerMs_defaultsToHundred() {
+        KafkaConfig config = new KafkaConfig("localhost:9092", null, null, 0);
+        assertEquals(100, config.lingerMs());
+    }
+
+    @Test
     void explicitValues_notOverridden() {
-        KafkaConfig config = new KafkaConfig("b1:9092,b2:9092", "my-prefix", "lz4");
+        KafkaConfig config = new KafkaConfig("b1:9092,b2:9092", "my-prefix", "lz4", 200);
         assertEquals("b1:9092,b2:9092", config.bootstrapServers());
         assertEquals("my-prefix", config.topicPrefix());
         assertEquals("lz4", config.compression());
+        assertEquals(200, config.lingerMs());
     }
 }
