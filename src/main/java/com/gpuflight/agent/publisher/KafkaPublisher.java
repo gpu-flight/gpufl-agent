@@ -5,6 +5,8 @@ import com.gpuflight.agent.model.LogWrapper;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 
+import com.gpuflight.agent.config.KafkaConfig;
+
 import java.util.Properties;
 
 public class KafkaPublisher implements Publisher {

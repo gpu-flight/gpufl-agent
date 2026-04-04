@@ -25,7 +25,7 @@ class PublisherFactoryTest {
     @Test
     void create_kafkaConfig_returnsKafkaPublisher() {
         // KafkaProducer constructor is lazy — it doesn't connect until send() is called.
-        KafkaConfig config = new KafkaConfig("localhost:9092", "prefix", "snappy");
+        KafkaConfig config = new KafkaConfig("localhost:9092", "prefix", "snappy", 100);
         Publisher publisher = PublisherFactory.create(config);
         assertInstanceOf(KafkaPublisher.class, publisher);
     }

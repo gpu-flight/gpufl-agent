@@ -114,7 +114,7 @@ class MainTest {
             assertNotNull(config);
             assertNotNull(config.source());
             // local.json has filePrefix "sass_divergence"
-            assertEquals("sass_divergence", config.source().filePrefix());
+            assertEquals("session", config.source().filePrefix());
             assertNotNull(config.publisher());
             assertNull(config.archiver());
         }
@@ -343,6 +343,25 @@ class MainTest {
         assertEquals("nyc3", config.archiver().region()); // default applied
     }
 
+    // ---- topicPrefix() ----
+
+    @Test
+    void topicPrefix_httpConfig_returnsGpuTrace() {
+        AgentConfig config = Main.loadFromArgs(new String[]{
+            "--folder=/logs", "--type=http", "--url=http://localhost/"
+        });
+        assertEquals("gpu-trace", Main.topicPrefix(config));
+    }
+
+    @Test
+    void topicPrefix_kafkaConfig_returnsConfiguredPrefix() {
+        AgentConfig config = Main.loadFromArgs(new String[]{
+            "--folder=/logs", "--type=kafka",
+            "--brokers=localhost:9092", "--topic-prefix=my-prefix"
+        });
+        assertEquals("my-prefix", Main.topicPrefix(config));
+    }
+
     // ---- loadClasspathConfig (private) via reflection ----
 
     @Test
@@ -352,7 +371,7 @@ class MainTest {
         AgentConfig config = (AgentConfig) m.invoke(null, "config/local.json");
 
         assertNotNull(config);
-        assertEquals("sass_divergence", config.source().filePrefix());
+        assertEquals("session", config.source().filePrefix());
     }
 
     // ---- printUsage() — smoke test ----

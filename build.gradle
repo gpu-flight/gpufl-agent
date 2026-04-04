@@ -54,10 +54,14 @@ jacoco {
     toolVersion = '0.8.13'
 }
 
-// Classes that require live external services (Kafka broker, S3) — excluded from coverage.
+// Classes excluded from coverage:
+//   LogArchiver, KafkaPublisher — require live external services (S3, Kafka broker)
+//   Main — entry-point class whose main() blocks forever on a CountDownLatch;
+//           all helper methods (resolve, require, loadFromArgs, etc.) are tested directly
 def jacocoExcludes = [
     '**/LogArchiver.class',
-    '**/KafkaPublisher.class'
+    '**/KafkaPublisher.class',
+    '**/Main.class'
 ]
 
 jacocoTestReport {
