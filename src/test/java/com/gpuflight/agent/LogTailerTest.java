@@ -59,7 +59,7 @@ class LogTailerTest {
 
         CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
         CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", cursorMgr, new LinkedBlockingQueue<>());
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
 
         Thread t = startTailer(tailer, publisher);
         awaitEvents(publisher.events, 2, 3000);
@@ -83,7 +83,7 @@ class LogTailerTest {
 
         CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
         CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "scope", cursorMgr, new LinkedBlockingQueue<>());
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "scope", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
 
         Thread t = startTailer(tailer, publisher);
         awaitEvents(publisher.events, 2, 3000);
@@ -103,7 +103,7 @@ class LogTailerTest {
 
         CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
         CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "system", cursorMgr, new LinkedBlockingQueue<>());
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "system", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
 
         Thread t = startTailer(tailer, publisher);
         awaitEvents(publisher.events, 1, 3000);
@@ -125,7 +125,7 @@ class LogTailerTest {
         File cursorFile = tempDir.resolve("cursor.json").toFile();
         CursorManager cursorMgr = new CursorManager(cursorFile);
         CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", cursorMgr, new LinkedBlockingQueue<>());
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
 
         Thread t = startTailer(tailer, publisher);
         awaitEvents(publisher.events, 1, 3000);
@@ -146,7 +146,7 @@ class LogTailerTest {
         // No log file exists initially — tailer should wait
         CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
         CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", cursorMgr, new LinkedBlockingQueue<>());
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
 
         Thread t = startTailer(tailer, publisher);
         Thread.sleep(300); // let it enter the waiting branch
@@ -172,7 +172,7 @@ class LogTailerTest {
         CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
         CapturingPublisher publisher = new CapturingPublisher();
         // Pass null for the queue — should not throw
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", cursorMgr, null);
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, null);
 
         Thread t = startTailer(tailer, publisher);
         awaitEvents(publisher.events, 1, 3000);
@@ -194,7 +194,7 @@ class LogTailerTest {
         LinkedBlockingQueue<Path> queue = new LinkedBlockingQueue<>();
         CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
         CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", cursorMgr, queue);
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, queue);
 
         Thread t = startTailer(tailer, publisher);
         // Wait for tailer to read the line and advance the cursor
@@ -237,7 +237,7 @@ class LogTailerTest {
 
         CursorManager cursorMgr = new CursorManager(cursorFile);
         CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", cursorMgr, new LinkedBlockingQueue<>());
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
 
         Thread t = startTailer(tailer, publisher);
         awaitEvents(publisher.events, 1, 5000);

@@ -10,13 +10,13 @@ import java.util.Properties;
 public class KafkaPublisher implements Publisher {
     private final KafkaProducer<String, String> producer;
 
-    public KafkaPublisher(String bootstrapServers) {
+    public KafkaPublisher(KafkaConfig config) {
         var props = new Properties();
-        props.put("bootstrap.servers", bootstrapServers);
+        props.put("bootstrap.servers", config.bootstrapServers());
         props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
         props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
-        props.put("compression.type", "snappy");
-        props.put("linger.ms", "100");
+        props.put("compression.type", config.compression());
+        props.put("linger.ms", String.valueOf(config.lingerMs()));
         this.producer = new KafkaProducer<>(props);
     }
 

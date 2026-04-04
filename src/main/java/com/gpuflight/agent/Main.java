@@ -19,9 +19,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 
 public class Main {
-    private static final List<String> LOG_TYPES = List.of("device", "scope", "system");
 
-    public static void main(String[] args) throws Exception {
+    static void main(String[] args) throws Exception {
         String configPath = parseConfigArg(args);
         AgentConfig config = configPath != null
             ? loadExternalConfig(configPath)
@@ -30,14 +29,18 @@ public class Main {
         Publisher publisher = PublisherFactory.create(config.publisher());
         var source = config.source();
         var folder = new File(source.folder());
-        var cursorMgr = new CursorManager(new File("./cursor.json"));
+
+        String cursorFile = resolve(args, "cursor-file", "GPUFL_CURSOR_FILE", "./cursor.json");
+        var cursorMgr = new CursorManager(new File(cursorFile));
         var consumedFilesQueue = new LinkedBlockingQueue<Path>();
+
+        String topicPrefix = topicPrefix(config);
 
         var executor = Executors.newVirtualThreadPerTaskExecutor();
 
-        for (String type : LOG_TYPES) {
+        for (String type : source.logTypes()) {
             executor.submit(() -> {
-                var tailer = new LogTailer(folder, source.filePrefix(), type, cursorMgr, consumedFilesQueue);
+                var tailer = new LogTailer(folder, source.filePrefix(), type, topicPrefix, cursorMgr, consumedFilesQueue);
                 tailer.tail(publisher);
             });
         }
@@ -90,6 +93,10 @@ public class Main {
 
         String folder = require(args, "folder", "GPUFL_SOURCE_FOLDER");
         String prefix = resolve(args, "prefix", "GPUFL_SOURCE_PREFIX", "gpufl");
+        String logTypesRaw = resolve(args, "log-types", "GPUFL_LOG_TYPES", null);
+        List<String> logTypes = logTypesRaw != null
+            ? Arrays.stream(logTypesRaw.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList()
+            : null; // null → LogSourceConfig compact constructor applies the default
         String type   = require(args, "type",   "GPUFL_PUBLISHER_TYPE");
 
         PublisherConfig publisher = switch (type.toLowerCase()) {
@@ -98,9 +105,10 @@ public class Main {
                 resolve(args, "token",   "GPUFL_HTTP_TOKEN", null),
                 Long.parseLong(resolve(args, "timeout", "GPUFL_HTTP_TIMEOUT_SEC", "10")));
             case "kafka" -> new KafkaConfig(
-                require(args, "brokers",      "GPUFL_KAFKA_BROKERS"),
-                resolve(args, "topic-prefix", "GPUFL_KAFKA_TOPIC_PREFIX", null),
-                resolve(args, "compression",  "GPUFL_KAFKA_COMPRESSION", null));
+                require(args, "brokers",        "GPUFL_KAFKA_BROKERS"),
+                resolve(args, "topic-prefix",   "GPUFL_KAFKA_TOPIC_PREFIX", null),
+                resolve(args, "compression",    "GPUFL_KAFKA_COMPRESSION", null),
+                Integer.parseInt(resolve(args, "kafka-linger-ms", "GPUFL_KAFKA_LINGER_MS", "0")));
             default -> {
                 System.err.println("❌ Unknown publisher type: '" + type + "' (expected: http, kafka)");
                 printUsage();
@@ -122,7 +130,7 @@ public class Main {
                 Boolean.parseBoolean(resolve(args, "archiver-delete", "GPUFL_ARCHIVER_DELETE", "false")));
         }
 
-        return new AgentConfig(new LogSourceConfig(folder, prefix), publisher, archiver);
+        return new AgentConfig(new LogSourceConfig(folder, prefix, logTypes), publisher, archiver);
     }
 
     /**
@@ -158,6 +166,14 @@ public class Main {
 
     static String buildArchiveKey(String prefix, Path path) {
         return prefix + path.toFile().getName();
+    }
+
+    /** Derives the topic/topic-prefix from whichever publisher is configured. */
+    static String topicPrefix(AgentConfig config) {
+        return switch (config.publisher()) {
+            case KafkaConfig kafka -> kafka.topicPrefix();
+            case HttpConfig ignored -> "gpu-trace";
+        };
     }
 
     // -------------------------------------------------------------------------
@@ -208,6 +224,8 @@ public class Main {
             Source (required):
               --folder=<path>              Log folder path          [GPUFL_SOURCE_FOLDER]
               --prefix=<name>              Log file prefix          [GPUFL_SOURCE_PREFIX]  default: gpufl
+              --log-types=<a,b,...>        Log channels to tail     [GPUFL_LOG_TYPES]      default: device,scope,system
+              --cursor-file=<path>         Cursor state file        [GPUFL_CURSOR_FILE]    default: ./cursor.json
 
             Publisher (required):
               --type=<http|kafka>          Publisher type           [GPUFL_PUBLISHER_TYPE]
@@ -221,6 +239,7 @@ public class Main {
               --brokers=<host:port,...>    Bootstrap servers        [GPUFL_KAFKA_BROKERS]
               --topic-prefix=<prefix>      Topic prefix             [GPUFL_KAFKA_TOPIC_PREFIX]  default: gpu-trace
               --compression=<type>         Compression codec        [GPUFL_KAFKA_COMPRESSION]  default: snappy
+              --kafka-linger-ms=<ms>       Producer linger.ms       [GPUFL_KAFKA_LINGER_MS]    default: 100
 
             Archiver (optional — disabled if --archiver-endpoint is absent):
               --archiver-endpoint=<url>    S3-compatible endpoint   [GPUFL_ARCHIVER_ENDPOINT]

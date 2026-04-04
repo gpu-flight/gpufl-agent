@@ -47,3 +47,4 @@ bin/
 .DS_Store
 
 cursor.json
+run-local.sh
