@@ -2,6 +2,7 @@ package com.gpuflight.agent;
 
 import tools.jackson.databind.JsonNode;
 import com.gpuflight.agent.config.JsonSettings;
+import com.gpuflight.agent.filter.DeviceMetricDeduplicator;
 import com.gpuflight.agent.model.LogWrapper;
 import com.gpuflight.agent.publisher.Publisher;
 
@@ -32,16 +33,24 @@ public class LogTailer {
     private final String topicPrefix;
     private final CursorManager cursorMgr;
     private final BlockingQueue<Path> consumedFilesQueue; // nullable
+    private final DeviceMetricDeduplicator deduplicator;    // nullable
     private final String streamKey;
 
     public LogTailer(File folder, String filePrefix, String logType, String topicPrefix,
                      CursorManager cursorMgr, BlockingQueue<Path> consumedFilesQueue) {
+        this(folder, filePrefix, logType, topicPrefix, cursorMgr, consumedFilesQueue, null);
+    }
+
+    public LogTailer(File folder, String filePrefix, String logType, String topicPrefix,
+                     CursorManager cursorMgr, BlockingQueue<Path> consumedFilesQueue,
+                     DeviceMetricDeduplicator deduplicator) {
         this.folder = folder;
         this.filePrefix = filePrefix;
         this.logType = logType;
         this.topicPrefix = topicPrefix;
         this.cursorMgr = cursorMgr;
         this.consumedFilesQueue = consumedFilesQueue;
+        this.deduplicator = deduplicator;
         this.streamKey = filePrefix + "." + logType;
     }
 
@@ -102,6 +111,18 @@ public class LogTailer {
                             if (!line.isBlank()) {
                                 LogWrapper wrapper = processLine(line);
                                 if (wrapper != null) {
+                                    // Deduplicate device metric batches if a deduplicator is configured
+                                    if (deduplicator != null && "device_metric_batch".equals(wrapper.type())) {
+                                        String filtered = deduplicator.filterBatch(wrapper.data());
+                                        if (filtered == null) {
+                                            offset = reader.getFilePointer();
+                                            continue; // all rows suppressed
+                                        }
+                                        if (!filtered.equals(wrapper.data())) {
+                                            wrapper = new LogWrapper(wrapper.agentSendingTime(), filtered,
+                                                                     wrapper.type(), wrapper.hostname(), wrapper.ipAddr());
+                                        }
+                                    }
                                     publisher.publish(topicPrefix, logType, wrapper);
                                 }
                             }

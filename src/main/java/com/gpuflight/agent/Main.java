@@ -7,6 +7,7 @@ import com.gpuflight.agent.config.PublisherConfig;
 import com.gpuflight.agent.model.AgentConfig;
 import com.gpuflight.agent.model.ArchiverConfig;
 import com.gpuflight.agent.model.LogSourceConfig;
+import com.gpuflight.agent.filter.DeviceMetricDeduplicator;
 import com.gpuflight.agent.publisher.Publisher;
 import com.gpuflight.agent.publisher.PublisherFactory;
 
@@ -27,8 +28,11 @@ public class Main {
             : loadFromArgs(args);
 
         Publisher publisher = PublisherFactory.create(config.publisher());
-        var source = config.source();
-        var folder = new File(source.folder());
+        var allSources = config.allSources();
+        if (allSources.isEmpty()) {
+            System.err.println("❌ No log sources configured (set --folder or \"sources\" in config)");
+            System.exit(1);
+        }
 
         String cursorFile = resolve(args, "cursor-file", "GPUFL_CURSOR_FILE", "./cursor.json");
         var cursorMgr = new CursorManager(new File(cursorFile));
@@ -37,12 +41,21 @@ public class Main {
         String topicPrefix = topicPrefix(config);
 
         var executor = Executors.newVirtualThreadPerTaskExecutor();
+        var deduplicator = new DeviceMetricDeduplicator();
 
-        for (String type : source.logTypes()) {
-            executor.submit(() -> {
-                var tailer = new LogTailer(folder, source.filePrefix(), type, topicPrefix, cursorMgr, consumedFilesQueue);
-                tailer.tail(publisher);
-            });
+        for (LogSourceConfig source : allSources) {
+            var folder = new File(source.folder());
+            System.out.println("[agent] Source: folder=" + folder + " prefix=" + source.filePrefix()
+                               + " types=" + source.logTypes());
+            for (String type : source.logTypes()) {
+                executor.submit(() -> {
+                    // Only the "system" channel carries device_metric_batch events
+                    var dedup = "system".equals(type) ? deduplicator : null;
+                    var tailer = new LogTailer(folder, source.filePrefix(), type, topicPrefix,
+                                               cursorMgr, consumedFilesQueue, dedup);
+                    tailer.tail(publisher);
+                });
+            }
         }
 
         if (config.archiver() != null) {
@@ -130,7 +143,13 @@ public class Main {
                 Boolean.parseBoolean(resolve(args, "archiver-delete", "GPUFL_ARCHIVER_DELETE", "false")));
         }
 
-        return new AgentConfig(new LogSourceConfig(folder, prefix, logTypes), publisher, archiver);
+        // Extra sources: comma-separated "folder:prefix" pairs
+        // e.g. GPUFL_EXTRA_SOURCES=/var/gpufl/demo:occupancy_demo.log,/var/gpufl/app2:myapp
+        List<LogSourceConfig> extraSources = parseExtraSources(
+            resolve(args, "extra-sources", "GPUFL_EXTRA_SOURCES", null));
+
+        return new AgentConfig(new LogSourceConfig(folder, prefix, logTypes),
+                               extraSources, publisher, archiver);
     }
 
     /**
@@ -155,6 +174,25 @@ public class Main {
             System.exit(1);
         }
         return val;
+    }
+
+    /**
+     * Parses extra source definitions from a comma-separated string.
+     * Format: "folder:prefix,folder:prefix,..."
+     * Each entry creates a LogSourceConfig with the default log types.
+     */
+    static List<LogSourceConfig> parseExtraSources(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        return Arrays.stream(raw.split(","))
+            .map(String::trim)
+            .filter(s -> !s.isEmpty())
+            .map(entry -> {
+                String[] parts = entry.split(":", 2);
+                String folder = parts[0].trim();
+                String prefix = parts.length > 1 ? parts[1].trim() : "gpufl";
+                return new LogSourceConfig(folder, prefix, null);
+            })
+            .toList();
     }
 
     static String parseConfigArg(String[] args) {
@@ -225,6 +263,7 @@ public class Main {
               --folder=<path>              Log folder path          [GPUFL_SOURCE_FOLDER]
               --prefix=<name>              Log file prefix          [GPUFL_SOURCE_PREFIX]  default: gpufl
               --log-types=<a,b,...>        Log channels to tail     [GPUFL_LOG_TYPES]      default: device,scope,system
+              --extra-sources=<f:p,...>   Additional folder:prefix [GPUFL_EXTRA_SOURCES]
               --cursor-file=<path>         Cursor state file        [GPUFL_CURSOR_FILE]    default: ./cursor.json
 
             Publisher (required):
