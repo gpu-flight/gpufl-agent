@@ -13,11 +13,12 @@ import com.gpuflight.agent.publisher.PublisherFactory;
 
 import java.io.File;
 import java.nio.file.Path;
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class Main {
 
@@ -28,9 +29,23 @@ public class Main {
             : loadFromArgs(args);
 
         Publisher publisher = PublisherFactory.create(config.publisher());
-        var allSources = config.allSources();
+
+        // Collect all sources: explicit source + auto-discovered from GPUFL_SOURCE_FOLDERS
+        List<LogSourceConfig> allSources = new ArrayList<>();
+        if (config.source() != null) allSources.add(config.source());
+
+        String foldersRaw = resolve(args, "folders", "GPUFL_SOURCE_FOLDERS", null);
+        if (foldersRaw != null) {
+            for (String folderPath : foldersRaw.split(",")) {
+                folderPath = folderPath.trim();
+                if (!folderPath.isEmpty()) {
+                    allSources.addAll(discoverSources(new File(folderPath)));
+                }
+            }
+        }
+
         if (allSources.isEmpty()) {
-            System.err.println("❌ No log sources configured (set --folder or \"sources\" in config)");
+            System.err.println("❌ No log sources configured (set --folder, --folders, or GPUFL_SOURCE_FOLDERS)");
             System.exit(1);
         }
 
@@ -104,7 +119,13 @@ public class Main {
             return loadClasspathConfig("config/local.json");
         }
 
-        String folder = require(args, "folder", "GPUFL_SOURCE_FOLDER");
+        String folder = resolve(args, "folder", "GPUFL_SOURCE_FOLDER", null);
+        String foldersEnv = resolve(args, "folders", "GPUFL_SOURCE_FOLDERS", null);
+        if (folder == null && foldersEnv == null) {
+            System.err.println("❌ --folder (or env GPUFL_SOURCE_FOLDER) or --folders (or env GPUFL_SOURCE_FOLDERS) is required");
+            printUsage();
+            System.exit(1);
+        }
         String prefix = resolve(args, "prefix", "GPUFL_SOURCE_PREFIX", "gpufl");
         String logTypesRaw = resolve(args, "log-types", "GPUFL_LOG_TYPES", null);
         List<String> logTypes = logTypesRaw != null
@@ -143,13 +164,9 @@ public class Main {
                 Boolean.parseBoolean(resolve(args, "archiver-delete", "GPUFL_ARCHIVER_DELETE", "false")));
         }
 
-        // Extra sources: comma-separated "folder:prefix" pairs
-        // e.g. GPUFL_EXTRA_SOURCES=/var/gpufl/demo:occupancy_demo.log,/var/gpufl/app2:myapp
-        List<LogSourceConfig> extraSources = parseExtraSources(
-            resolve(args, "extra-sources", "GPUFL_EXTRA_SOURCES", null));
-
-        return new AgentConfig(new LogSourceConfig(folder, prefix, logTypes),
-                               extraSources, publisher, archiver);
+        LogSourceConfig source = folder != null
+            ? new LogSourceConfig(folder, prefix, logTypes) : null;
+        return new AgentConfig(source, publisher, archiver);
     }
 
     /**
@@ -176,23 +193,34 @@ public class Main {
         return val;
     }
 
+    /** Log file name pattern: {prefix}.{type}.log */
+    private static final Pattern LOG_FILE_PATTERN =
+        Pattern.compile("^(.+)\\.(device|scope|system)\\.log$");
+
     /**
-     * Parses extra source definitions from a comma-separated string.
-     * Format: "folder:prefix,folder:prefix,..."
-     * Each entry creates a LogSourceConfig with the default log types.
+     * Scans a folder for gpufl log files and returns one LogSourceConfig
+     * per unique prefix found.  For example, if the folder contains
+     * {@code session.device.log} and {@code myapp.scope.log}, two configs
+     * are returned with prefixes "session" and "myapp".
      */
-    static List<LogSourceConfig> parseExtraSources(String raw) {
-        if (raw == null || raw.isBlank()) return null;
-        return Arrays.stream(raw.split(","))
-            .map(String::trim)
-            .filter(s -> !s.isEmpty())
-            .map(entry -> {
-                String[] parts = entry.split(":", 2);
-                String folder = parts[0].trim();
-                String prefix = parts.length > 1 ? parts[1].trim() : "gpufl";
-                return new LogSourceConfig(folder, prefix, null);
-            })
-            .toList();
+    static List<LogSourceConfig> discoverSources(File folder) {
+        List<LogSourceConfig> result = new ArrayList<>();
+        if (!folder.isDirectory()) return result;
+
+        Set<String> prefixes = new LinkedHashSet<>();
+        File[] files = folder.listFiles();
+        if (files == null) return result;
+
+        for (File f : files) {
+            Matcher m = LOG_FILE_PATTERN.matcher(f.getName());
+            if (m.matches()) prefixes.add(m.group(1));
+        }
+
+        for (String prefix : prefixes) {
+            System.out.println("[agent] Discovered prefix \"" + prefix + "\" in " + folder);
+            result.add(new LogSourceConfig(folder.getAbsolutePath(), prefix, null));
+        }
+        return result;
     }
 
     static String parseConfigArg(String[] args) {
@@ -259,11 +287,11 @@ public class Main {
             Config file (overrides all flags):
               --config=<path>              Load full JSON config from file
 
-            Source (required):
+            Source (at least one of --folder or --folders is required):
               --folder=<path>              Log folder path          [GPUFL_SOURCE_FOLDER]
               --prefix=<name>              Log file prefix          [GPUFL_SOURCE_PREFIX]  default: gpufl
+              --folders=<p1,p2,...>        Auto-discover folders    [GPUFL_SOURCE_FOLDERS]
               --log-types=<a,b,...>        Log channels to tail     [GPUFL_LOG_TYPES]      default: device,scope,system
-              --extra-sources=<f:p,...>   Additional folder:prefix [GPUFL_EXTRA_SOURCES]
               --cursor-file=<path>         Cursor state file        [GPUFL_CURSOR_FILE]    default: ./cursor.json
 
             Publisher (required):
