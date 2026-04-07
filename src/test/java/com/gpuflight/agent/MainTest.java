@@ -13,6 +13,8 @@ import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -23,38 +25,54 @@ class MainTest {
     @Test
     void resolve_returnsFlagValue() {
         String[] args = {"--url=http://example.com", "--token=abc"};
-        assertEquals("http://example.com", Main.resolve(args, "url", "GPUFL_HTTP_URL", null));
+        assertEquals("http://example.com", Main.resolve(args, "url", "GPUFL_HTTP_URL", null, Collections.emptyMap()));
     }
 
     @Test
     void resolve_returnsSecondFlagValue() {
         String[] args = {"--url=http://example.com", "--token=abc"};
-        assertEquals("abc", Main.resolve(args, "token", "GPUFL_HTTP_TOKEN", null));
+        assertEquals("abc", Main.resolve(args, "token", "GPUFL_HTTP_TOKEN", null, Collections.emptyMap()));
     }
 
     @Test
     void resolve_returnsDefaultWhenAbsent() {
         String[] args = {};
-        assertEquals("default-val", Main.resolve(args, "missing-flag", "GPUFL_MISSING_VAR_XYZ123", "default-val"));
+        assertEquals("default-val", Main.resolve(args, "missing-flag", "GPUFL_MISSING_VAR_XYZ123", "default-val", Collections.emptyMap()));
     }
 
     @Test
     void resolve_returnsNullDefaultWhenAbsent() {
         String[] args = {};
-        assertNull(Main.resolve(args, "missing-flag", "GPUFL_MISSING_VAR_XYZ123", null));
+        assertNull(Main.resolve(args, "missing-flag", "GPUFL_MISSING_VAR_XYZ123", null, Collections.emptyMap()));
     }
 
     @Test
     void resolve_flagTakesPrecedenceOverDefault() {
         String[] args = {"--folder=/from-cli"};
-        assertEquals("/from-cli", Main.resolve(args, "folder", "GPUFL_SOURCE_FOLDER_NOTSET_XYZ", "/default"));
+        assertEquals("/from-cli", Main.resolve(args, "folder", "GPUFL_SOURCE_FOLDER_NOTSET_XYZ", "/default", Collections.emptyMap()));
     }
 
     @Test
     void resolve_partialMatchDoesNotReturn() {
         // --folderExtra should not match --folder=
         String[] args = {"--folderExtra=/wrong"};
-        assertNull(Main.resolve(args, "folder", "GPUFL_MISSING_XYZ123", null));
+        assertNull(Main.resolve(args, "folder", "GPUFL_MISSING_XYZ123", null, Collections.emptyMap()));
+    }
+
+    // ---- env var support ----
+
+    @Test
+    void resolve_returnsEnvVarWhenFlagAbsent() {
+        String[] args = {};
+        Map<String, String> env = Map.of("GPUFL_HTTP_URL", "http://env-url.com");
+        assertEquals("http://env-url.com", Main.resolve(args, "url", "GPUFL_HTTP_URL", null, env));
+    }
+
+    @Test
+    void resolve_flagTakesPrecedenceOverEnvVar() {
+        String[] args = {"--url=http://cli-url.com"};
+        Map<String, String> env = Map.of("GPUFL_HTTP_URL", "http://env-url.com");
+        assertEquals("http://cli-url.com", Main.resolve(args, "url", "GPUFL_HTTP_URL", null, env));
     }
 
     // ---- require() ----
@@ -62,7 +80,7 @@ class MainTest {
     @Test
     void require_returnsValueWhenPresent() {
         String[] args = {"--folder=/tmp/logs"};
-        assertEquals("/tmp/logs", Main.require(args, "folder", "GPUFL_SOURCE_FOLDER"));
+        assertEquals("/tmp/logs", Main.require(args, "folder", "GPUFL_SOURCE_FOLDER", Collections.emptyMap()));
     }
 
     // ---- parseConfigArg() ----
@@ -128,7 +146,7 @@ class MainTest {
             "--folder=/var/log", "--type=http",
             "--url=http://localhost:8080/api/v1/events/"
         };
-        AgentConfig config = Main.loadFromArgs(args);
+        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         assertNotNull(config);
         assertEquals("/var/log", config.source().folder());
         assertEquals("gpufl", config.source().filePrefix()); // default prefix
@@ -146,7 +164,7 @@ class MainTest {
             "--folder=/logs", "--type=http",
             "--url=http://collector:8080/", "--token=tok123"
         };
-        AgentConfig config = Main.loadFromArgs(args);
+        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         HttpConfig http = (HttpConfig) config.publisher();
         assertEquals("tok123", http.authToken());
     }
@@ -157,7 +175,7 @@ class MainTest {
             "--folder=/logs", "--type=http",
             "--url=http://collector:8080/", "--timeout=30"
         };
-        AgentConfig config = Main.loadFromArgs(args);
+        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         HttpConfig http = (HttpConfig) config.publisher();
         assertEquals(30L, http.timeoutSeconds());
     }
@@ -168,7 +186,7 @@ class MainTest {
             "--folder=/logs", "--prefix=myapp", "--type=http",
             "--url=http://localhost/"
         };
-        AgentConfig config = Main.loadFromArgs(args);
+        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         assertEquals("myapp", config.source().filePrefix());
     }
 
@@ -181,7 +199,7 @@ class MainTest {
             "--brokers=broker1:9092,broker2:9092",
             "--topic-prefix=my-topic", "--compression=lz4"
         };
-        AgentConfig config = Main.loadFromArgs(args);
+        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         assertInstanceOf(KafkaConfig.class, config.publisher());
         KafkaConfig kafka = (KafkaConfig) config.publisher();
         assertEquals("broker1:9092,broker2:9092", kafka.bootstrapServers());
@@ -195,7 +213,7 @@ class MainTest {
             "--folder=/var/log", "--type=kafka",
             "--brokers=localhost:9092"
         };
-        AgentConfig config = Main.loadFromArgs(args);
+        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         KafkaConfig kafka = (KafkaConfig) config.publisher();
         // KafkaConfig compact constructor replaces null with defaults
         assertEquals("gpu-trace", kafka.topicPrefix());
@@ -213,7 +231,7 @@ class MainTest {
             "--archiver-access-key=AKIAKEY",
             "--archiver-secret-key=SECRET"
         };
-        AgentConfig config = Main.loadFromArgs(args);
+        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         assertNotNull(config.archiver());
         assertEquals("http://minio:9000", config.archiver().endpoint());
         assertEquals("my-bucket", config.archiver().bucket());
@@ -236,7 +254,7 @@ class MainTest {
             "--archiver-prefix=logs/",
             "--archiver-delete=true"
         };
-        AgentConfig config = Main.loadFromArgs(args);
+        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         ArchiverConfig archiver = config.archiver();
         assertNotNull(archiver);
         assertEquals("us-east-1", archiver.region());
@@ -249,7 +267,7 @@ class MainTest {
         String[] args = {
             "--folder=/logs", "--type=http", "--url=http://localhost/"
         };
-        AgentConfig config = Main.loadFromArgs(args);
+        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         assertNull(config.archiver());
     }
 
