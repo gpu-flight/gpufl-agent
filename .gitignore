@@ -46,5 +46,8 @@ bin/
 ### Mac OS ###
 .DS_Store
 
+## Local config
+config
+
 cursor.json
 run-local.sh

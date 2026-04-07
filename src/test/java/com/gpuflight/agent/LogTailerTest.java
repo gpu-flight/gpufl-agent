@@ -25,8 +25,9 @@ class LogTailerTest {
         final List<LogWrapper> events = new CopyOnWriteArrayList<>();
 
         @Override
-        public void publish(String topic, String key, LogWrapper log) {
+        public boolean publish(String topic, String key, LogWrapper log) {
             events.add(log);
+            return true;
         }
 
         @Override

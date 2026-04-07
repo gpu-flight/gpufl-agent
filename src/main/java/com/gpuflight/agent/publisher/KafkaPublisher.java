@@ -23,14 +23,16 @@ public class KafkaPublisher implements Publisher {
     }
 
     @Override
-    public void publish(String topic, String key, LogWrapper log) {
+    public boolean publish(String topic, String key, LogWrapper log) {
         try {
             String message = JsonSettings.MAPPER.writeValueAsString(log.data());
             // producer.send() is async and only blocks when the internal buffer is full.
             // Blocking on a virtual thread is fine — carrier thread parks, not blocks.
-            producer.send(new ProducerRecord<>(topic, key, message));
+            producer.send(new ProducerRecord<>(topic, key, message)).get();
+            return true;
         } catch (Exception e) {
             System.out.println("Kafka publish error: " + e.getMessage());
+            return false;
         }
     }
 

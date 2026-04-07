@@ -29,10 +29,24 @@ public class Main {
             : loadFromArgs(args);
 
         Publisher publisher = PublisherFactory.create(config.publisher());
+        System.out.println("[agent] Publisher: " + config.publisher().getClass().getSimpleName());
 
         // Collect all sources: explicit source + auto-discovered from GPUFL_SOURCE_FOLDERS
         List<LogSourceConfig> allSources = new ArrayList<>();
-        if (config.source() != null) allSources.add(config.source());
+        if (config.source() != null) {
+            System.out.println("[agent] Explicit source: folder=" + config.source().folder()
+                             + " prefix=" + config.source().filePrefix()
+                             + " types=" + config.source().logTypes());
+            allSources.add(config.source());
+        }
+        if (config.sources() != null) {
+            for (LogSourceConfig s : config.sources()) {
+                System.out.println("[agent] Config source: folder=" + s.folder()
+                                 + " prefix=" + s.filePrefix()
+                                 + " types=" + s.logTypes());
+                allSources.add(s);
+            }
+        }
 
         String foldersRaw = resolve(args, "folders", "GPUFL_SOURCE_FOLDERS", null);
         if (foldersRaw != null) {
@@ -166,7 +180,7 @@ public class Main {
 
         LogSourceConfig source = folder != null
             ? new LogSourceConfig(folder, prefix, logTypes) : null;
-        return new AgentConfig(source, publisher, archiver);
+        return new AgentConfig(source, null, publisher, archiver);
     }
 
     /**

@@ -23,7 +23,7 @@ public class HttpPublisher implements Publisher {
     }
 
     @Override
-    public void publish(String topic, String key, LogWrapper log) {
+    public boolean publish(String topic, String key, LogWrapper log) {
         try {
             String url = config.endpointUrl() + log.type();
             String message = JsonSettings.MAPPER.writeValueAsString(log);
@@ -41,13 +41,17 @@ public class HttpPublisher implements Publisher {
 
             // Blocking send is fine on a virtual thread — the carrier thread parks, not blocks.
             var response = client.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() < 200 || response.statusCode() > 299) {
-                System.out.println("HTTP Publish failed [" + url + "]: " + response.statusCode() + " - " + response.body());
+            if (response.statusCode() >= 200 && response.statusCode() <= 299) {
+                return true;
             }
+            System.out.println("HTTP Publish failed [" + url + "]: " + response.statusCode() + " - " + response.body());
+            return false;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            return false;
         } catch (Exception e) {
             System.out.println("HTTP Connection error: " + e);
+            return false;
         }
     }
 

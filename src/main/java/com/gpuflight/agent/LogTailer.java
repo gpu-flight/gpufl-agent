@@ -74,6 +74,8 @@ public class LogTailer {
         long offset = cursor.offset();
 
         System.out.println("[" + logType + "] Starting – fileIndex=" + idx + ", offset=" + offset);
+        System.out.println("[" + logType + "] Active file: " + activeFile().getAbsolutePath());
+        System.out.println("[" + logType + "] Active file exists: " + activeFile().exists() + ", size: " + (activeFile().exists() ? activeFile().length() : -1));
 
         while (!Thread.currentThread().isInterrupted()) {
             File file = idx == 0 ? activeFile() : rotatedFile(idx);
@@ -107,6 +109,7 @@ public class LogTailer {
 
                     if (fileLen > offset) {
                         String line;
+                        boolean publishFailed = false;
                         while ((line = reader.readLine()) != null) {
                             if (!line.isBlank()) {
                                 LogWrapper wrapper = processLine(line);
@@ -123,12 +126,24 @@ public class LogTailer {
                                                                      wrapper.type(), wrapper.hostname(), wrapper.ipAddr());
                                         }
                                     }
-                                    publisher.publish(topicPrefix, logType, wrapper);
+                                    System.out.println("[" + logType + "] Publishing: " + wrapper.type() + " (" + wrapper.data().length() + " bytes)");
+                                    boolean ok = publisher.publish(topicPrefix, logType, wrapper);
+                                    if (!ok) {
+                                        System.out.println("[" + logType + "] Publish FAILED for " + wrapper.type() + " – will retry in 5s");
+                                        // Seek back so this line is retried on next iteration
+                                        reader.seek(offset);
+                                        publishFailed = true;
+                                        break;
+                                    }
+                                    System.out.println("[" + logType + "] Published OK: " + wrapper.type());
                                 }
                             }
                             offset = reader.getFilePointer();
                         }
                         cursorMgr.update(streamKey, idx, offset);
+                        if (publishFailed) {
+                            sleep(5000); // back off before retry
+                        }
                     } else {
                         // No new bytes in this file.
                         if (idx == 0) {

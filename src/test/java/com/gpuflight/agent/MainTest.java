@@ -343,6 +343,62 @@ class MainTest {
         assertEquals("nyc3", config.archiver().region()); // default applied
     }
 
+    // ---- loadExternalConfig — sources array ----
+
+    @Test
+    void loadExternalConfig_sourcesArray(@TempDir Path tempDir) throws Exception {
+        String json = """
+            {
+              "sources": [
+                { "folder": "/logs/app1", "filePrefix": "app1" },
+                { "folder": "/logs/app2", "filePrefix": "app2" }
+              ],
+              "publisher": { "type": "http", "endpointUrl": "http://localhost/" }
+            }
+            """;
+        File configFile = tempDir.resolve("multi.json").toFile();
+        Files.writeString(configFile.toPath(), json);
+
+        Method m = Main.class.getDeclaredMethod("loadExternalConfig", String.class);
+        m.setAccessible(true);
+        AgentConfig config = (AgentConfig) m.invoke(null, configFile.getAbsolutePath());
+
+        assertNotNull(config);
+        assertNull(config.source());
+        assertNotNull(config.sources());
+        assertEquals(2, config.sources().size());
+        assertEquals("/logs/app1", config.sources().get(0).folder());
+        assertEquals("app1", config.sources().get(0).filePrefix());
+        assertEquals("/logs/app2", config.sources().get(1).folder());
+        assertEquals("app2", config.sources().get(1).filePrefix());
+    }
+
+    @Test
+    void loadExternalConfig_sourceAndSourcesMerged(@TempDir Path tempDir) throws Exception {
+        String json = """
+            {
+              "source": { "folder": "/logs/main", "filePrefix": "main" },
+              "sources": [
+                { "folder": "/logs/extra", "filePrefix": "extra" }
+              ],
+              "publisher": { "type": "http", "endpointUrl": "http://localhost/" }
+            }
+            """;
+        File configFile = tempDir.resolve("both.json").toFile();
+        Files.writeString(configFile.toPath(), json);
+
+        Method m = Main.class.getDeclaredMethod("loadExternalConfig", String.class);
+        m.setAccessible(true);
+        AgentConfig config = (AgentConfig) m.invoke(null, configFile.getAbsolutePath());
+
+        assertNotNull(config);
+        assertNotNull(config.source());
+        assertEquals("/logs/main", config.source().folder());
+        assertNotNull(config.sources());
+        assertEquals(1, config.sources().size());
+        assertEquals("/logs/extra", config.sources().get(0).folder());
+    }
+
     // ---- topicPrefix() ----
 
     @Test
