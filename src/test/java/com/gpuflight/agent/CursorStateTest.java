@@ -40,4 +40,11 @@ class CursorStateTest {
         state.streams().put("key", new CursorPosition(0, 100L));
         assertEquals(100L, state.streams().get("key").offset());
     }
+
+    @Test
+    void jsonCreator_withEmptyMap_works() {
+        CursorState state = new CursorState(Map.of());
+        assertNotNull(state.streams());
+        assertTrue(state.streams().isEmpty());
+    }
 }

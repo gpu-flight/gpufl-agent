@@ -74,6 +74,8 @@ public class LogTailer {
         long offset = cursor.offset();
 
         System.out.println("[" + logType + "] Starting – fileIndex=" + idx + ", offset=" + offset);
+        System.out.println("[" + logType + "] Active file: " + activeFile().getAbsolutePath());
+        System.out.println("[" + logType + "] Active file exists: " + activeFile().exists() + ", size: " + (activeFile().exists() ? activeFile().length() : -1));
 
         while (!Thread.currentThread().isInterrupted()) {
             File file = idx == 0 ? activeFile() : rotatedFile(idx);
@@ -88,13 +90,10 @@ public class LogTailer {
                     offset = 0;
                     cursorMgr.update(streamKey, idx, offset);
                 } else {
-                    System.out.println("[" + logType + "] Waiting for active file: " + file.getAbsolutePath() + "…");
-                    sleep(2000);
+                    sleep(1000);
                 }
                 continue;
             }
-
-            System.out.println("[" + logType + "] Reading: " + file.getName());
 
             try (var reader = new RandomAccessFile(file, "r")) {
                 if (offset > file.length()) offset = 0;
@@ -103,10 +102,9 @@ public class LogTailer {
                 boolean fileIsDone = false;
 
                 while (!Thread.currentThread().isInterrupted() && !fileIsDone) {
-                    long fileLen = file.length();
-
-                    if (fileLen > offset) {
+                    if (file.length() > offset) {
                         String line;
+                        boolean publishFailed = false;
                         while ((line = reader.readLine()) != null) {
                             if (!line.isBlank()) {
                                 LogWrapper wrapper = processLine(line);
@@ -123,12 +121,22 @@ public class LogTailer {
                                                                      wrapper.type(), wrapper.hostname(), wrapper.ipAddr());
                                         }
                                     }
-                                    publisher.publish(topicPrefix, logType, wrapper);
+                                    boolean ok = publisher.publish(topicPrefix, logType, wrapper);
+                                    if (!ok) {
+                                        System.out.println("[" + logType + "] Publish FAILED for " + wrapper.type() + " – will retry in 5s");
+                                        // Seek back so this line is retried on next iteration
+                                        reader.seek(offset);
+                                        publishFailed = true;
+                                        break;
+                                    }
                                 }
                             }
                             offset = reader.getFilePointer();
                         }
                         cursorMgr.update(streamKey, idx, offset);
+                        if (publishFailed) {
+                            sleep(5000); // back off before retry
+                        }
                     } else {
                         // No new bytes in this file.
                         if (idx == 0) {
@@ -136,15 +144,20 @@ public class LogTailer {
                             // On rotation the C++ client renames the active file to .1.log and
                             // creates a new empty active file. .1.log must be at least as large
                             // as our current offset (it *is* the old active, just renamed).
+                            
+                            // Break the inner loop to close the current file reader,
+                            // then reopen it in the next outer loop iteration.
+                            // This allows rotation to occur on Windows.
+                            fileIsDone = true;
+
                             File rotated = rotatedFile(1);
                             if (rotated.exists() && rotated.length() >= offset) {
                                 System.out.println("[" + logType + "] Rotation detected – switching to " + rotated.getName() + " at offset " + offset);
                                 idx = 1;
                                 // Intentionally keep offset so we skip bytes already sent.
                                 cursorMgr.update(streamKey, idx, offset);
-                                fileIsDone = true;
                             } else {
-                                sleep(100);
+                                sleep(200);
                             }
                         } else {
                             // Finished draining the rotated file.
@@ -162,7 +175,7 @@ public class LogTailer {
                 }
             } catch (IOException e) {
                 System.out.println("[" + logType + "] IO error: " + e.getMessage());
-                sleep(1000);
+                sleep(2000);
             }
         }
     }

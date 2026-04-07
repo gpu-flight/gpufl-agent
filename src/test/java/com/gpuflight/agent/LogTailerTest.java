@@ -25,8 +25,9 @@ class LogTailerTest {
         final List<LogWrapper> events = new CopyOnWriteArrayList<>();
 
         @Override
-        public void publish(String topic, String key, LogWrapper log) {
+        public boolean publish(String topic, String key, LogWrapper log) {
             events.add(log);
+            return true;
         }
 
         @Override
@@ -199,11 +200,18 @@ class LogTailerTest {
         Thread t = startTailer(tailer, publisher);
         // Wait for tailer to read the line and advance the cursor
         awaitEvents(publisher.events, 1, 3000);
+        
+        // Stop the tailer thread to release the file lock
+        t.interrupt();
+        t.join(5000);
 
         // Simulate rotation: rename active → .1.log, create new empty active
         Path rotatedFile = tempDir.resolve("app.device.1.log");
         Files.move(activeFile, rotatedFile);
         Files.createFile(activeFile); // new empty active file
+
+        // Restart tailer to see if it detects the rotation from the persisted cursor
+        t = startTailer(tailer, publisher);
 
         // The tailer should detect rotation and switch to index 1,
         // then drain the rotated file (it's already fully read, offset == length)

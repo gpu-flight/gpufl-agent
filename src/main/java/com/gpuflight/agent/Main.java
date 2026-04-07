@@ -29,10 +29,24 @@ public class Main {
             : loadFromArgs(args);
 
         Publisher publisher = PublisherFactory.create(config.publisher());
+        System.out.println("[agent] Publisher: " + config.publisher().getClass().getSimpleName());
 
         // Collect all sources: explicit source + auto-discovered from GPUFL_SOURCE_FOLDERS
         List<LogSourceConfig> allSources = new ArrayList<>();
-        if (config.source() != null) allSources.add(config.source());
+        if (config.source() != null) {
+            System.out.println("[agent] Explicit source: folder=" + config.source().folder()
+                             + " prefix=" + config.source().filePrefix()
+                             + " types=" + config.source().logTypes());
+            allSources.add(config.source());
+        }
+        if (config.sources() != null) {
+            for (LogSourceConfig s : config.sources()) {
+                System.out.println("[agent] Config source: folder=" + s.folder()
+                                 + " prefix=" + s.filePrefix()
+                                 + " types=" + s.logTypes());
+                allSources.add(s);
+            }
+        }
 
         String foldersRaw = resolve(args, "folders", "GPUFL_SOURCE_FOLDERS", null);
         if (foldersRaw != null) {
@@ -111,38 +125,42 @@ public class Main {
      * Falls back to the bundled local.json when no flags or GPUFL_* vars are present.
      */
     static AgentConfig loadFromArgs(String[] args) {
+        return loadFromArgs(args, System.getenv());
+    }
+
+    static AgentConfig loadFromArgs(String[] args, Map<String, String> env) {
         boolean hasAnyConfig = Arrays.stream(args).anyMatch(a -> a.startsWith("--"))
-            || System.getenv().keySet().stream().anyMatch(k -> k.startsWith("GPUFL_"));
+            || env.keySet().stream().anyMatch(k -> k.startsWith("GPUFL_"));
 
         if (!hasAnyConfig) {
             System.out.println("No flags or GPUFL_* env vars found — using bundled local.json");
             return loadClasspathConfig("config/local.json");
         }
 
-        String folder = resolve(args, "folder", "GPUFL_SOURCE_FOLDER", null);
-        String foldersEnv = resolve(args, "folders", "GPUFL_SOURCE_FOLDERS", null);
+        String folder = resolve(args, "folder", "GPUFL_SOURCE_FOLDER", null, env);
+        String foldersEnv = resolve(args, "folders", "GPUFL_SOURCE_FOLDERS", null, env);
         if (folder == null && foldersEnv == null) {
             System.err.println("❌ --folder (or env GPUFL_SOURCE_FOLDER) or --folders (or env GPUFL_SOURCE_FOLDERS) is required");
             printUsage();
             System.exit(1);
         }
-        String prefix = resolve(args, "prefix", "GPUFL_SOURCE_PREFIX", "gpufl");
-        String logTypesRaw = resolve(args, "log-types", "GPUFL_LOG_TYPES", null);
+        String prefix = resolve(args, "prefix", "GPUFL_SOURCE_PREFIX", "gpufl", env);
+        String logTypesRaw = resolve(args, "log-types", "GPUFL_LOG_TYPES", null, env);
         List<String> logTypes = logTypesRaw != null
             ? Arrays.stream(logTypesRaw.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList()
             : null; // null → LogSourceConfig compact constructor applies the default
-        String type   = require(args, "type",   "GPUFL_PUBLISHER_TYPE");
+        String type   = require(args, "type",   "GPUFL_PUBLISHER_TYPE", env);
 
         PublisherConfig publisher = switch (type.toLowerCase()) {
             case "http"  -> new HttpConfig(
-                require(args, "url",     "GPUFL_HTTP_URL"),
-                resolve(args, "token",   "GPUFL_HTTP_TOKEN", null),
-                Long.parseLong(resolve(args, "timeout", "GPUFL_HTTP_TIMEOUT_SEC", "10")));
+                require(args, "url",     "GPUFL_HTTP_URL", env),
+                resolve(args, "token",   "GPUFL_HTTP_TOKEN", null, env),
+                Long.parseLong(resolve(args, "timeout", "GPUFL_HTTP_TIMEOUT_SEC", "10", env)));
             case "kafka" -> new KafkaConfig(
-                require(args, "brokers",        "GPUFL_KAFKA_BROKERS"),
-                resolve(args, "topic-prefix",   "GPUFL_KAFKA_TOPIC_PREFIX", null),
-                resolve(args, "compression",    "GPUFL_KAFKA_COMPRESSION", null),
-                Integer.parseInt(resolve(args, "kafka-linger-ms", "GPUFL_KAFKA_LINGER_MS", "0")));
+                require(args, "brokers",        "GPUFL_KAFKA_BROKERS", env),
+                resolve(args, "topic-prefix",   "GPUFL_KAFKA_TOPIC_PREFIX", null, env),
+                resolve(args, "compression",    "GPUFL_KAFKA_COMPRESSION", null, env),
+                Integer.parseInt(resolve(args, "kafka-linger-ms", "GPUFL_KAFKA_LINGER_MS", "0", env)));
             default -> {
                 System.err.println("❌ Unknown publisher type: '" + type + "' (expected: http, kafka)");
                 printUsage();
@@ -152,39 +170,47 @@ public class Main {
         };
 
         ArchiverConfig archiver = null;
-        String archiverEndpoint = resolve(args, "archiver-endpoint", "GPUFL_ARCHIVER_ENDPOINT", null);
+        String archiverEndpoint = resolve(args, "archiver-endpoint", "GPUFL_ARCHIVER_ENDPOINT", null, env);
         if (archiverEndpoint != null) {
             archiver = new ArchiverConfig(
                 archiverEndpoint,
-                require(args, "archiver-bucket",     "GPUFL_ARCHIVER_BUCKET"),
-                resolve(args, "archiver-region",     "GPUFL_ARCHIVER_REGION", null),
-                require(args, "archiver-access-key", "GPUFL_ARCHIVER_ACCESS_KEY"),
-                require(args, "archiver-secret-key", "GPUFL_ARCHIVER_SECRET_KEY"),
-                resolve(args, "archiver-prefix",     "GPUFL_ARCHIVER_PREFIX", null),
-                Boolean.parseBoolean(resolve(args, "archiver-delete", "GPUFL_ARCHIVER_DELETE", "false")));
+                require(args, "archiver-bucket",     "GPUFL_ARCHIVER_BUCKET", env),
+                resolve(args, "archiver-region",     "GPUFL_ARCHIVER_REGION", null, env),
+                require(args, "archiver-access-key", "GPUFL_ARCHIVER_ACCESS_KEY", env),
+                require(args, "archiver-secret-key", "GPUFL_ARCHIVER_SECRET_KEY", env),
+                resolve(args, "archiver-prefix",     "GPUFL_ARCHIVER_PREFIX", null, env),
+                Boolean.parseBoolean(resolve(args, "archiver-delete", "GPUFL_ARCHIVER_DELETE", "false", env)));
         }
 
         LogSourceConfig source = folder != null
             ? new LogSourceConfig(folder, prefix, logTypes) : null;
-        return new AgentConfig(source, publisher, archiver);
+        return new AgentConfig(source, null, publisher, archiver);
     }
 
     /**
      * Resolves a config value: checks --flag=value in args first, then the env var, then the default.
      */
     static String resolve(String[] args, String flag, String envVar, String defaultValue) {
+        return resolve(args, flag, envVar, defaultValue, System.getenv());
+    }
+
+    static String resolve(String[] args, String flag, String envVar, String defaultValue, Map<String, String> env) {
         String prefix = "--" + flag + "=";
         for (String arg : args) {
             if (arg.startsWith(prefix)) return arg.substring(prefix.length());
         }
-        String env = System.getenv(envVar);
-        if (env != null && !env.isBlank()) return env;
+        String envVal = env.get(envVar);
+        if (envVal != null && !envVal.isBlank()) return envVal;
         return defaultValue;
     }
 
     /** Like resolve(), but exits with an error if the value is absent. */
     static String require(String[] args, String flag, String envVar) {
-        String val = resolve(args, flag, envVar, null);
+        return require(args, flag, envVar, System.getenv());
+    }
+
+    static String require(String[] args, String flag, String envVar, Map<String, String> env) {
+        String val = resolve(args, flag, envVar, null, env);
         if (val == null) {
             System.err.println("❌ --" + flag + " (or env " + envVar + ") is required");
             printUsage();
