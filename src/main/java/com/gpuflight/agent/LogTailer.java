@@ -6,9 +6,11 @@ import com.gpuflight.agent.filter.DeviceMetricDeduplicator;
 import com.gpuflight.agent.model.LogWrapper;
 import com.gpuflight.agent.publisher.Publisher;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
 import java.net.InetAddress;
 import java.nio.file.Path;
 import java.util.concurrent.BlockingQueue;
@@ -105,7 +107,10 @@ public class LogTailer {
                     if (file.length() > offset) {
                         String line;
                         boolean publishFailed = false;
-                        while ((line = reader.readLine()) != null) {
+                        // NOTE: RandomAccessFile.readLine() decodes bytes as ISO-8859-1,
+                        // corrupting multi-byte UTF-8 characters (e.g. em dash — becomes â€").
+                        // Use readLineUtf8() instead to preserve source file content encoding.
+                        while ((line = readLineUtf8(reader)) != null) {
                             if (!line.isBlank()) {
                                 LogWrapper wrapper = processLine(line);
                                 if (wrapper != null) {
@@ -196,6 +201,37 @@ public class LogTailer {
             System.out.println("Failed to parse line: " + e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Read a line from a RandomAccessFile, decoding bytes as UTF-8.
+     * <p>
+     * {@link RandomAccessFile#readLine()} decodes each byte as Latin-1
+     * (lower 8 bits only), which corrupts multi-byte UTF-8 characters
+     * like em dash (U+2014: 0xE2 0x80 0x94 → â€").  This method reads
+     * raw bytes up to a newline and decodes the buffer as UTF-8.
+     * <p>
+     * Handles both {@code \n} and {@code \r\n} line endings.
+     * Returns null at EOF (same contract as readLine).
+     */
+    private static String readLineUtf8(RandomAccessFile raf) throws IOException {
+        var buf = new ByteArrayOutputStream(512);
+        int b;
+        boolean foundAny = false;
+        while ((b = raf.read()) != -1) {
+            foundAny = true;
+            if (b == '\n') break;
+            if (b == '\r') {
+                // Peek for \n after \r
+                long pos = raf.getFilePointer();
+                int next = raf.read();
+                if (next != '\n' && next != -1) raf.seek(pos);
+                break;
+            }
+            buf.write(b);
+        }
+        if (!foundAny) return null;
+        return buf.toString(StandardCharsets.UTF_8);
     }
 
     private static void sleep(long ms) {

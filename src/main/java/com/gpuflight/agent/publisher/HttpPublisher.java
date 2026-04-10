@@ -44,6 +44,15 @@ public class HttpPublisher implements Publisher {
             if (response.statusCode() >= 200 && response.statusCode() <= 299) {
                 return true;
             }
+            if (response.statusCode() == 402) {
+                // GPU limit exceeded — permanent failure, do not retry
+                System.err.println("[GPUFL] ========================================");
+                System.err.println("[GPUFL] GPU limit exceeded for this workspace.");
+                System.err.println("[GPUFL] " + response.body());
+                System.err.println("[GPUFL] Upgrade at https://gpuflight.com/pricing");
+                System.err.println("[GPUFL] ========================================");
+                return true; // advance cursor — retrying won't help
+            }
             System.out.println("HTTP Publish failed [" + url + "]: " + response.statusCode() + " - " + response.body());
             return false;
         } catch (InterruptedException e) {
