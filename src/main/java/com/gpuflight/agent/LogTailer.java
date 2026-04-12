@@ -198,7 +198,9 @@ public class LogTailer {
                 inet.getHostAddress()
             );
         } catch (Exception e) {
-            System.out.println("Failed to parse line: " + e.getMessage());
+            // Occasional parse failures are expected when tailing an actively-written
+            // file — the reader may see a partial line before the writer flushes.
+            System.err.println("[LogTailer] Skipping malformed line: " + e.getMessage());
             return null;
         }
     }
@@ -215,13 +217,14 @@ public class LogTailer {
      * Returns null at EOF (same contract as readLine).
      */
     private static String readLineUtf8(RandomAccessFile raf) throws IOException {
+        long startPos = raf.getFilePointer();
         var buf = new ByteArrayOutputStream(512);
         int b;
-        boolean foundAny = false;
+        boolean foundNewline = false;
         while ((b = raf.read()) != -1) {
-            foundAny = true;
-            if (b == '\n') break;
+            if (b == '\n') { foundNewline = true; break; }
             if (b == '\r') {
+                foundNewline = true;
                 // Peek for \n after \r
                 long pos = raf.getFilePointer();
                 int next = raf.read();
@@ -230,7 +233,13 @@ public class LogTailer {
             }
             buf.write(b);
         }
-        if (!foundAny) return null;
+        if (!foundNewline) {
+            // Hit EOF without finding a line terminator — the line is incomplete
+            // (writer hasn't flushed yet).  Seek back so the next read retries
+            // from the same position once more data is available.
+            raf.seek(startPos);
+            return null;
+        }
         return buf.toString(StandardCharsets.UTF_8);
     }
 
