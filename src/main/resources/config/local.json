@@ -5,8 +5,8 @@
   },
   "publisher": {
     "type": "http",
-    "endpointUrl": "",
+    "hostUrl": "https://api.gpuflight.com",
+    "apiVersion": "v1",
     "authToken": ""
   }
 }
-

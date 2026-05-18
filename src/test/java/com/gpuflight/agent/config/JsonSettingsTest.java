@@ -15,11 +15,25 @@ class JsonSettingsTest {
 
     @Test
     void mapper_doesNotFailOnUnknownProperties() throws Exception {
-        // FAIL_ON_UNKNOWN_PROPERTIES is disabled — extra fields must be ignored
-        String json = "{\"unknownField\":\"value\",\"type\":\"http\",\"endpointUrl\":\"http://localhost/\",\"authToken\":null}";
+        // FAIL_ON_UNKNOWN_PROPERTIES is disabled — extra fields must be ignored.
+        // `aBrandNewField` is a stand-in for any future-version or
+        // typoed key. The required fields (hostUrl) ARE present so
+        // the HttpConfig compact constructor doesn't fire its
+        // migration-error path — this test is solely about Jackson's
+        // unknown-field tolerance, not about validation behavior.
+        String json = """
+            {
+              "unknownField": "value",
+              "aBrandNewField": 42,
+              "type": "http",
+              "hostUrl": "http://localhost",
+              "authToken": null
+            }
+            """;
         // Should deserialize without throwing
         HttpConfig config = JsonSettings.MAPPER.readValue(json, HttpConfig.class);
         assertNotNull(config);
+        assertEquals("http://localhost", config.hostUrl());
     }
 
     @Test
