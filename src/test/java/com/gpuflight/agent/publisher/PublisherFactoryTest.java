@@ -10,14 +10,14 @@ class PublisherFactoryTest {
 
     @Test
     void create_httpConfig_returnsHttpPublisher() {
-        HttpConfig config = new HttpConfig("http://localhost:8080/", null, 5);
+        HttpConfig config = new HttpConfig("http://localhost:8080", "v1", null, 5);
         Publisher publisher = PublisherFactory.create(config);
         assertInstanceOf(HttpPublisher.class, publisher);
     }
 
     @Test
     void create_httpConfig_publisherCloseDoesNotThrow() {
-        HttpConfig config = new HttpConfig("http://localhost:8080/", "tok", 10);
+        HttpConfig config = new HttpConfig("http://localhost:8080", "v1", "tok", 10);
         Publisher publisher = PublisherFactory.create(config);
         assertDoesNotThrow(publisher::close);
     }

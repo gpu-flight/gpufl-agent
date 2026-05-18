@@ -24,13 +24,13 @@ class MainTest {
 
     @Test
     void resolve_returnsFlagValue() {
-        String[] args = {"--url=http://example.com", "--token=abc"};
-        assertEquals("http://example.com", Main.resolve(args, "url", "GPUFL_HTTP_URL", null, Collections.emptyMap()));
+        String[] args = {"--host=http://example.com", "--token=abc"};
+        assertEquals("http://example.com", Main.resolve(args, "host", "GPUFL_HTTP_HOST", null, Collections.emptyMap()));
     }
 
     @Test
     void resolve_returnsSecondFlagValue() {
-        String[] args = {"--url=http://example.com", "--token=abc"};
+        String[] args = {"--host=http://example.com", "--token=abc"};
         assertEquals("abc", Main.resolve(args, "token", "GPUFL_HTTP_TOKEN", null, Collections.emptyMap()));
     }
 
@@ -64,15 +64,15 @@ class MainTest {
     @Test
     void resolve_returnsEnvVarWhenFlagAbsent() {
         String[] args = {};
-        Map<String, String> env = Map.of("GPUFL_HTTP_URL", "http://env-url.com");
-        assertEquals("http://env-url.com", Main.resolve(args, "url", "GPUFL_HTTP_URL", null, env));
+        Map<String, String> env = Map.of("GPUFL_HTTP_HOST", "http://env-url.com");
+        assertEquals("http://env-url.com", Main.resolve(args, "host", "GPUFL_HTTP_HOST", null, env));
     }
 
     @Test
     void resolve_flagTakesPrecedenceOverEnvVar() {
-        String[] args = {"--url=http://cli-url.com"};
-        Map<String, String> env = Map.of("GPUFL_HTTP_URL", "http://env-url.com");
-        assertEquals("http://cli-url.com", Main.resolve(args, "url", "GPUFL_HTTP_URL", null, env));
+        String[] args = {"--host=http://cli-url.com"};
+        Map<String, String> env = Map.of("GPUFL_HTTP_HOST", "http://env-url.com");
+        assertEquals("http://cli-url.com", Main.resolve(args, "host", "GPUFL_HTTP_HOST", null, env));
     }
 
     // ---- require() ----
@@ -144,7 +144,7 @@ class MainTest {
     void loadFromArgs_httpPublisher_basic() {
         String[] args = {
             "--folder=/var/log", "--type=http",
-            "--url=http://localhost:8080/api/v1/events/"
+            "--host=http://localhost:8080"
         };
         AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         assertNotNull(config);
@@ -152,7 +152,9 @@ class MainTest {
         assertEquals("gpufl", config.source().filePrefix()); // default prefix
         assertInstanceOf(HttpConfig.class, config.publisher());
         HttpConfig http = (HttpConfig) config.publisher();
-        assertEquals("http://localhost:8080/api/v1/events/", http.endpointUrl());
+        assertEquals("http://localhost:8080", http.hostUrl());
+        assertEquals("v1", http.apiVersion());        // default apiVersion
+        assertEquals("http://localhost:8080/api/v1/events/init", http.endpointFor("init"));
         assertNull(http.authToken());
         assertEquals(10L, http.timeoutSeconds()); // default timeout
         assertNull(config.archiver());
@@ -162,7 +164,7 @@ class MainTest {
     void loadFromArgs_httpPublisher_withToken() {
         String[] args = {
             "--folder=/logs", "--type=http",
-            "--url=http://collector:8080/", "--token=tok123"
+            "--host=http://collector:8080", "--token=tok123"
         };
         AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         HttpConfig http = (HttpConfig) config.publisher();
@@ -173,7 +175,7 @@ class MainTest {
     void loadFromArgs_httpPublisher_customTimeout() {
         String[] args = {
             "--folder=/logs", "--type=http",
-            "--url=http://collector:8080/", "--timeout=30"
+            "--host=http://collector:8080", "--timeout=30"
         };
         AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         HttpConfig http = (HttpConfig) config.publisher();
@@ -184,7 +186,7 @@ class MainTest {
     void loadFromArgs_httpPublisher_customPrefix() {
         String[] args = {
             "--folder=/logs", "--prefix=myapp", "--type=http",
-            "--url=http://localhost/"
+            "--host=http://localhost"
         };
         AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         assertEquals("myapp", config.source().filePrefix());
@@ -225,7 +227,7 @@ class MainTest {
     @Test
     void loadFromArgs_withArchiver_defaults() {
         String[] args = {
-            "--folder=/logs", "--type=http", "--url=http://localhost/",
+            "--folder=/logs", "--type=http", "--host=http://localhost",
             "--archiver-endpoint=http://minio:9000",
             "--archiver-bucket=my-bucket",
             "--archiver-access-key=AKIAKEY",
@@ -245,7 +247,7 @@ class MainTest {
     @Test
     void loadFromArgs_withArchiver_explicitOptions() {
         String[] args = {
-            "--folder=/logs", "--type=http", "--url=http://localhost/",
+            "--folder=/logs", "--type=http", "--host=http://localhost",
             "--archiver-endpoint=http://s3.example.com",
             "--archiver-bucket=bucket",
             "--archiver-region=us-east-1",
@@ -265,7 +267,7 @@ class MainTest {
     @Test
     void loadFromArgs_noArchiver_whenEndpointAbsent() {
         String[] args = {
-            "--folder=/logs", "--type=http", "--url=http://localhost/"
+            "--folder=/logs", "--type=http", "--host=http://localhost"
         };
         AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         assertNull(config.archiver());
@@ -278,7 +280,7 @@ class MainTest {
         String json = """
             {
               "source": { "folder": "/tmp/test", "filePrefix": "testapp" },
-              "publisher": { "type": "http", "endpointUrl": "http://localhost/", "authToken": null }
+              "publisher": { "type": "http", "hostUrl": "http://localhost", "authToken": null }
             }
             """;
         File configFile = tempDir.resolve("agent.json").toFile();
@@ -298,7 +300,7 @@ class MainTest {
         String json = """
             {
               "source": { "folder": "/tmp/ext", "filePrefix": "extapp" },
-              "publisher": { "type": "http", "endpointUrl": "http://localhost:9090/", "authToken": "tok" }
+              "publisher": { "type": "http", "hostUrl": "http://localhost:9090", "authToken": "tok" }
             }
             """;
         File configFile = tempDir.resolve("ext.json").toFile();
@@ -340,7 +342,7 @@ class MainTest {
         String json = """
             {
               "source": { "folder": "/logs", "filePrefix": "app" },
-              "publisher": { "type": "http", "endpointUrl": "http://localhost/" },
+              "publisher": { "type": "http", "hostUrl": "http://localhost" },
               "archiver": {
                 "endpoint": "http://minio:9000",
                 "bucket": "logs",
@@ -371,7 +373,7 @@ class MainTest {
                 { "folder": "/logs/app1", "filePrefix": "app1" },
                 { "folder": "/logs/app2", "filePrefix": "app2" }
               ],
-              "publisher": { "type": "http", "endpointUrl": "http://localhost/" }
+              "publisher": { "type": "http", "hostUrl": "http://localhost" }
             }
             """;
         File configFile = tempDir.resolve("multi.json").toFile();
@@ -399,7 +401,7 @@ class MainTest {
               "sources": [
                 { "folder": "/logs/extra", "filePrefix": "extra" }
               ],
-              "publisher": { "type": "http", "endpointUrl": "http://localhost/" }
+              "publisher": { "type": "http", "hostUrl": "http://localhost" }
             }
             """;
         File configFile = tempDir.resolve("both.json").toFile();
@@ -422,7 +424,7 @@ class MainTest {
     @Test
     void topicPrefix_httpConfig_returnsGpuTrace() {
         AgentConfig config = Main.loadFromArgs(new String[]{
-            "--folder=/logs", "--type=http", "--url=http://localhost/"
+            "--folder=/logs", "--type=http", "--host=http://localhost"
         });
         assertEquals("gpu-trace", Main.topicPrefix(config));
     }

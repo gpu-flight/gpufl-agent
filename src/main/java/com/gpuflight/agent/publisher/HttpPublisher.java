@@ -25,7 +25,10 @@ public class HttpPublisher implements Publisher {
     @Override
     public boolean publish(String topic, String key, LogWrapper log) {
         try {
-            String url = config.endpointUrl() + log.type();
+            // Path is structural — assembled inside HttpConfig from
+            // hostUrl + apiVersion + event-type segment. See
+            // HttpConfig.endpointFor() for the template.
+            String url = config.endpointFor(log.type());
             String message = JsonSettings.MAPPER.writeValueAsString(log);
 
             var requestBuilder = HttpRequest.newBuilder()

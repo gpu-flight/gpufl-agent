@@ -151,10 +151,25 @@ public class Main {
             : null; // null → LogSourceConfig compact constructor applies the default
         String type   = require(args, "type",   "GPUFL_PUBLISHER_TYPE", env);
 
+        // Reject the legacy --url / GPUFL_HTTP_URL flag with a migration
+        // hint. Removed May 2026 in favor of --host + --api-version (see
+        // HttpConfig javadoc). Without this explicit check the user
+        // would silently lose the URL value (resolve() would return
+        // null for the new --host name) and hit the IllegalArgumentException
+        // out of HttpConfig's compact constructor — same outcome but
+        // less obvious about WHICH legacy flag is at fault.
+        if (resolve(args, "url", "GPUFL_HTTP_URL", null, env) != null) {
+            System.err.println("❌ --url / GPUFL_HTTP_URL is no longer supported.");
+            System.err.println("   Use --host=<scheme://host[:port]>      (or env GPUFL_HTTP_HOST)");
+            System.err.println("       --api-version=<v1|v2|...>          (or env GPUFL_HTTP_API_VERSION, default: v1)");
+            System.err.println("   The /api/{version}/events/ path is now built automatically.");
+            System.exit(1);
+        }
         PublisherConfig publisher = switch (type.toLowerCase()) {
             case "http"  -> new HttpConfig(
-                require(args, "url",     "GPUFL_HTTP_URL", env),
-                resolve(args, "token",   "GPUFL_HTTP_TOKEN", null, env),
+                require(args, "host",          "GPUFL_HTTP_HOST", env),
+                resolve(args, "api-version",   "GPUFL_HTTP_API_VERSION", HttpConfig.DEFAULT_API_VERSION, env),
+                resolve(args, "token",         "GPUFL_HTTP_TOKEN", null, env),
                 Long.parseLong(resolve(args, "timeout", "GPUFL_HTTP_TIMEOUT_SEC", "10", env)));
             case "kafka" -> new KafkaConfig(
                 require(args, "brokers",        "GPUFL_KAFKA_BROKERS", env),
@@ -324,9 +339,10 @@ public class Main {
               --type=<http|kafka>          Publisher type           [GPUFL_PUBLISHER_TYPE]
 
             HTTP publisher:
-              --url=<url>                  Endpoint URL             [GPUFL_HTTP_URL]
-              --token=<token>              Bearer auth token        [GPUFL_HTTP_TOKEN]
-              --timeout=<seconds>          Request timeout          [GPUFL_HTTP_TIMEOUT_SEC]  default: 10
+              --host=<scheme://host[:port]> Backend host             [GPUFL_HTTP_HOST]          e.g. https://api.gpuflight.com
+              --api-version=<v1|v2|...>    Backend API version       [GPUFL_HTTP_API_VERSION]   default: v1
+              --token=<token>              Bearer auth token         [GPUFL_HTTP_TOKEN]
+              --timeout=<seconds>          Request timeout           [GPUFL_HTTP_TIMEOUT_SEC]   default: 10
 
             Kafka publisher:
               --brokers=<host:port,...>    Bootstrap servers        [GPUFL_KAFKA_BROKERS]
@@ -345,10 +361,10 @@ public class Main {
 
             Examples:
               # CLI flags
-              gpufl-agent --folder=/var/log/gpuflight --type=http --url=http://collector:8080/api/v1/events/
+              gpufl-agent --folder=/var/log/gpuflight --type=http --host=https://api.gpuflight.com
 
               # Env vars (systemd / Docker)
-              GPUFL_SOURCE_FOLDER=/var/log GPUFL_PUBLISHER_TYPE=http GPUFL_HTTP_URL=http://... gpufl-agent
+              GPUFL_SOURCE_FOLDER=/var/log GPUFL_PUBLISHER_TYPE=http GPUFL_HTTP_HOST=https://api.gpuflight.com gpufl-agent
 
               # JSON config file
               gpufl-agent --config=/etc/gpuflight/agent.json
