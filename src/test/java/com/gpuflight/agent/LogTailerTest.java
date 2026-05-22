@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.File;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -15,6 +16,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -32,6 +34,32 @@ class LogTailerTest {
 
         @Override
         public void close() {}
+    }
+
+    /** Publisher that rejects any line whose data contains a marker (simulates
+     *  a backend that won't accept a specific event), accepting everything else. */
+    static class RejectingPublisher implements Publisher {
+        final List<LogWrapper> events = new CopyOnWriteArrayList<>();
+        final String reject;
+        RejectingPublisher(String reject) { this.reject = reject; }
+
+        @Override
+        public boolean publish(String topic, String key, LogWrapper log) {
+            if (reject != null && log.data().contains(reject)) return false;
+            events.add(log);
+            return true;
+        }
+
+        @Override
+        public void close() {}
+    }
+
+    /** gzip src → dest (used to simulate the C++ client compressing a rotated file). */
+    private static void gzip(Path src, Path dest) throws IOException {
+        try (var in = Files.newInputStream(src);
+             var out = new GZIPOutputStream(Files.newOutputStream(dest))) {
+            in.transferTo(out);
+        }
     }
 
     private static Thread startTailer(LogTailer tailer, Publisher publisher) {
@@ -254,5 +282,118 @@ class LogTailerTest {
 
         // Should recover and eventually read from the active file
         assertFalse(publisher.events.isEmpty(), "Should fall back to active file after rotated file is gone");
+    }
+
+    // ---- A: read compressed (.gz) rotated files ----
+
+    @Test
+    void tail_readsGzRotatedFile(@TempDir Path tempDir) throws Exception {
+        String content =
+            "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n" +
+            "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
+        Path plain = tempDir.resolve("app.device.1.log");
+        Files.writeString(plain, content);
+        Path gz = tempDir.resolve("app.device.1.log.gz");
+        gzip(plain, gz);
+        Files.delete(plain);                              // only the .gz remains
+        Files.createFile(tempDir.resolve("app.device.log")); // empty active so tailer doesn't just wait
+
+        File cursorFile = tempDir.resolve("cursor.json").toFile();
+        Files.writeString(cursorFile.toPath(),
+            "{\"streams\":{\"app.device\":{\"fileIndex\":1,\"offset\":0}}}");
+
+        CursorManager cursorMgr = new CursorManager(cursorFile);
+        CapturingPublisher publisher = new CapturingPublisher();
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
+                cursorMgr, new LinkedBlockingQueue<>());
+
+        Thread t = startTailer(tailer, publisher);
+        awaitEvents(publisher.events, 2, 3000);
+        t.interrupt();
+        t.join(2000);
+
+        assertEquals(2, publisher.events.size(), "Both lines should be read from the .gz");
+    }
+
+    @Test
+    void tail_gzResumeFromOffset(@TempDir Path tempDir) throws Exception {
+        String l1 = "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n";
+        String l2 = "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
+        Path plain = tempDir.resolve("app.device.1.log");
+        Files.writeString(plain, l1 + l2);
+        Path gz = tempDir.resolve("app.device.1.log.gz");
+        gzip(plain, gz);
+        Files.delete(plain);
+        Files.createFile(tempDir.resolve("app.device.log"));
+
+        long off = l1.getBytes(StandardCharsets.UTF_8).length; // start after the first line
+        File cursorFile = tempDir.resolve("cursor.json").toFile();
+        Files.writeString(cursorFile.toPath(),
+            "{\"streams\":{\"app.device\":{\"fileIndex\":1,\"offset\":" + off + "}}}");
+
+        CursorManager cursorMgr = new CursorManager(cursorFile);
+        CapturingPublisher publisher = new CapturingPublisher();
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
+                cursorMgr, new LinkedBlockingQueue<>());
+
+        Thread t = startTailer(tailer, publisher);
+        awaitEvents(publisher.events, 1, 3000);
+        t.interrupt();
+        t.join(2000);
+
+        assertEquals(1, publisher.events.size(), "Only the line after the offset should be read");
+        assertTrue(publisher.events.get(0).data().contains("k2"));
+    }
+
+    // ---- D: restart recovers the unread tail after the client compressed it ----
+
+    @Test
+    void tail_restartAfterCompression_recoversUnreadTail(@TempDir Path tempDir) throws Exception {
+        Path active = tempDir.resolve("app.device.log");
+        String k1 = "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n";
+        String k2 = "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
+        Files.writeString(active, k1 + k2);
+
+        File cursorFile = tempDir.resolve("cursor.json").toFile();
+
+        // Run 1: publisher accepts k1, rejects k2 → the agent stays "behind" at the
+        // offset after k1, having recorded the file's identity in the cursor.
+        RejectingPublisher pub1 = new RejectingPublisher("k2");
+        LogTailer tailer1 = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
+                new CursorManager(cursorFile), new LinkedBlockingQueue<>());
+        Thread t1 = startTailer(tailer1, pub1);
+        awaitEvents(pub1.events, 1, 3000);  // k1 published
+        Thread.sleep(400);                  // let it attempt+fail k2 and persist the cursor
+        t1.interrupt();
+        t1.join(2000);
+
+        CursorPosition saved = new CursorManager(cursorFile).get("app.device");
+        assertEquals(0, saved.fileIndex());
+        assertEquals(k1.getBytes(StandardCharsets.UTF_8).length, saved.offset(),
+                "cursor should sit just after k1");
+        assertTrue(saved.headSig() != 0L, "file identity (headSig) should be captured");
+
+        // Simulate the client rotating AND immediately compressing: the old active
+        // content lands in .1.log.gz, the active file is replaced with fresh content.
+        Path gz = tempDir.resolve("app.device.1.log.gz");
+        gzip(active, gz);
+        Files.delete(active);
+        String k3 = "{\"type\":\"kernel_event\",\"name\":\"k3\"}\n";
+        Files.writeString(active, k3);
+
+        // Run 2: without A+D the k2 tail (now only inside the .gz) would be lost.
+        CapturingPublisher pub2 = new CapturingPublisher();
+        LogTailer tailer2 = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
+                new CursorManager(cursorFile), new LinkedBlockingQueue<>());
+        Thread t2 = startTailer(tailer2, pub2);
+        awaitEvents(pub2.events, 2, 5000);  // k2 (recovered from gz) + k3 (new active)
+        t2.interrupt();
+        t2.join(2000);
+
+        List<String> datas = pub2.events.stream().map(LogWrapper::data).toList();
+        assertTrue(datas.stream().anyMatch(d -> d.contains("k2")),
+                "k2 must be recovered from the compressed rotated file");
+        assertTrue(datas.stream().anyMatch(d -> d.contains("k3")),
+                "k3 from the new active file should also be read");
     }
 }
