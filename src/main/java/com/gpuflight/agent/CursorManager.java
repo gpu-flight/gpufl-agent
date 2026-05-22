@@ -40,8 +40,23 @@ public class CursorManager {
         }
     }
 
+    /**
+     * Update offset without changing recorded file identity. Preserves any
+     * identity already stored for this stream so identity-less call sites
+     * don't wipe it.
+     */
     public void update(String streamKey, int fileIndex, long offset) {
-        var newPos = new CursorPosition(fileIndex, offset);
+        var oldPos = state.streams().get(streamKey);
+        String fileKey = oldPos != null ? oldPos.fileKey() : null;
+        long fileSize = oldPos != null ? oldPos.fileSize() : 0L;
+        long headSig = oldPos != null ? oldPos.headSig() : 0L;
+        update(streamKey, fileIndex, offset, fileKey, fileSize, headSig);
+    }
+
+    /** Update offset and record the identity of the file being read. */
+    public void update(String streamKey, int fileIndex, long offset,
+                       String fileKey, long fileSize, long headSig) {
+        var newPos = new CursorPosition(fileIndex, offset, fileKey, fileSize, headSig);
         var oldPos = state.streams().get(streamKey);
         if (!newPos.equals(oldPos)) {
             state.streams().put(streamKey, newPos);

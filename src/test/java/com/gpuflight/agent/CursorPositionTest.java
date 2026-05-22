@@ -32,4 +32,24 @@ class CursorPositionTest {
         assertTrue(s.contains("fileIndex=1"));
         assertTrue(s.contains("offset=100"));
     }
+
+    @Test
+    void testIdentityDefaultsForLegacyConstructor() {
+        // The 2-arg constructor (legacy call sites + old cursor files) must leave
+        // identity unset so behavior degrades to the original logic.
+        CursorPosition pos = new CursorPosition(1, 100L);
+        assertNull(pos.fileKey());
+        assertEquals(0L, pos.fileSize());
+        assertEquals(0L, pos.headSig());
+    }
+
+    @Test
+    void testFullConstructorCarriesIdentity() {
+        CursorPosition pos = new CursorPosition(2, 200L, "inode-123", 4096L, 99887766L);
+        assertEquals(2, pos.fileIndex());
+        assertEquals(200L, pos.offset());
+        assertEquals("inode-123", pos.fileKey());
+        assertEquals(4096L, pos.fileSize());
+        assertEquals(99887766L, pos.headSig());
+    }
 }
