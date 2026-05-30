@@ -25,11 +25,10 @@ import java.util.zip.GZIPInputStream;
 /**
  * Tails log files written by the C++ gpufl client.
  *
- * File naming convention produced by the C++ LogFileRotator:
- *   Active file  : <prefix>.<channel>.log         (no numeric suffix; always being written)
- *   Rotated files: <prefix>.<channel>.1.log        (most recently rotated)
- *                  <prefix>.<channel>.1.log.gz      (after the client compresses it)
- *                  <prefix>.<channel>.2.log[.gz]    (older), …
+ * v1.2 file naming (one LogTailer per session/channel pair):
+ *   Active file  : <folder>/<sessionId>/<channel>.log
+ *   Rotated files: <folder>/<sessionId>/<channel>.1.log[.gz]   (newest rotated)
+ *                  <folder>/<sessionId>/<channel>.2.log[.gz]   (older), …
  *
  * Cursor fileIndex semantics:
  *   0   → currently tailing the active file
@@ -42,10 +41,16 @@ import java.util.zip.GZIPInputStream;
  *   D) on restart it locates the file it was reading by a content signature
  *      (which survives both rename and compression) instead of blindly
  *      resetting to the new active file.
+ *
+ * Migration from v1.1: pre-v1.2 used a flat layout
+ * <folder>/<prefix>.<channel>.log[.N.log[.gz]] (one tailer per
+ * <prefix>.<channel> pair). v1.2 nests each session in its own
+ * subdirectory; one tailer per <sessionId>.<channel> pair instead. The
+ * tailer's API is unchanged, just the path construction.
  */
 public class LogTailer {
     private final File folder;
-    private final String filePrefix;
+    private final String sessionId;
     private final String logType;
     private final String topicPrefix;
     private final CursorManager cursorMgr;
@@ -59,27 +64,36 @@ public class LogTailer {
     /** Bytes of uncompressed head used for the content signature. */
     private static final int HEAD_SIG_BYTES = 512;
 
-    public LogTailer(File folder, String filePrefix, String logType, String topicPrefix,
+    public LogTailer(File folder, String sessionId, String logType, String topicPrefix,
                      CursorManager cursorMgr, BlockingQueue<Path> consumedFilesQueue) {
-        this(folder, filePrefix, logType, topicPrefix, cursorMgr, consumedFilesQueue, null);
+        this(folder, sessionId, logType, topicPrefix, cursorMgr, consumedFilesQueue, null);
     }
 
-    public LogTailer(File folder, String filePrefix, String logType, String topicPrefix,
+    public LogTailer(File folder, String sessionId, String logType, String topicPrefix,
                      CursorManager cursorMgr, BlockingQueue<Path> consumedFilesQueue,
                      DeviceMetricDeduplicator deduplicator) {
         this.folder = folder;
-        this.filePrefix = filePrefix;
+        this.sessionId = sessionId;
         this.logType = logType;
         this.topicPrefix = topicPrefix;
         this.cursorMgr = cursorMgr;
         this.consumedFilesQueue = consumedFilesQueue;
         this.deduplicator = deduplicator;
-        this.streamKey = filePrefix + "." + logType;
+        // Cursor key namespaces by session_id so two concurrent sessions'
+        // device channels (say `s1.device` and `s2.device`) don't share
+        // a cursor position. Survives restart — sessions in
+        // cursor.json that are no longer on disk get pruned lazily.
+        this.streamKey = sessionId + "." + logType;
     }
 
-    /** The active file written by the C++ client: <prefix>.<type>.log */
+    /** The session subdirectory under the watched folder. */
+    private File sessionDir() {
+        return new File(folder, sessionId);
+    }
+
+    /** v1.2 active file: <folder>/<sessionId>/<channel>.log */
     private File activeFile() {
-        return new File(folder, filePrefix + "." + logType + ".log");
+        return new File(sessionDir(), logType + ".log");
     }
 
     /**
@@ -88,9 +102,9 @@ public class LogTailer {
      * has compressed it. Returns null if neither exists.
      */
     private File resolveRotated(int index) {
-        File plain = new File(folder, filePrefix + "." + logType + "." + index + ".log");
+        File plain = new File(sessionDir(), logType + "." + index + ".log");
         if (plain.exists()) return plain;
-        File gz = new File(folder, filePrefix + "." + logType + "." + index + ".log.gz");
+        File gz = new File(sessionDir(), logType + "." + index + ".log.gz");
         return gz.exists() ? gz : null;
     }
 
