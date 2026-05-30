@@ -80,7 +80,13 @@ class LogTailerTest {
 
     @Test
     void tail_readsExistingLinesAndPublishes(@TempDir Path tempDir) throws Exception {
-        Path logFile = tempDir.resolve("app.device.log");
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
+        Path logFile = tempDir.resolve("app/device.log");
         Files.writeString(logFile,
             "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n" +
             "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n"
@@ -102,7 +108,13 @@ class LogTailerTest {
 
     @Test
     void tail_skipsBlankLines(@TempDir Path tempDir) throws Exception {
-        Path logFile = tempDir.resolve("app.scope.log");
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
+        Path logFile = tempDir.resolve("app/scope.log");
         Files.writeString(logFile,
             "{\"type\":\"scope_event\"}\n" +
             "\n" +
@@ -124,7 +136,13 @@ class LogTailerTest {
 
     @Test
     void tail_invalidJsonLine_doesNotCrash(@TempDir Path tempDir) throws Exception {
-        Path logFile = tempDir.resolve("app.system.log");
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
+        Path logFile = tempDir.resolve("app/system.log");
         Files.writeString(logFile,
             "not-json-at-all\n" +
             "{\"type\":\"system_event\"}\n"
@@ -148,7 +166,13 @@ class LogTailerTest {
 
     @Test
     void tail_persistsCursorAfterReading(@TempDir Path tempDir) throws Exception {
-        Path logFile = tempDir.resolve("app.device.log");
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
+        Path logFile = tempDir.resolve("app/device.log");
         Files.writeString(logFile, "{\"type\":\"kernel_event\"}\n");
 
         File cursorFile = tempDir.resolve("cursor.json").toFile();
@@ -172,6 +196,12 @@ class LogTailerTest {
 
     @Test
     void tail_waitsForActiveFileToAppear(@TempDir Path tempDir) throws Exception {
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
         // No log file exists initially — tailer should wait
         CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
         CapturingPublisher publisher = new CapturingPublisher();
@@ -181,7 +211,7 @@ class LogTailerTest {
         Thread.sleep(300); // let it enter the waiting branch
 
         // Now create the file with content
-        Path logFile = tempDir.resolve("app.device.log");
+        Path logFile = tempDir.resolve("app/device.log");
         Files.writeString(logFile, "{\"type\":\"kernel_event\"}\n");
 
         awaitEvents(publisher.events, 1, 5000);
@@ -195,7 +225,13 @@ class LogTailerTest {
 
     @Test
     void tail_nullQueue_doesNotThrow(@TempDir Path tempDir) throws Exception {
-        Path logFile = tempDir.resolve("app.device.log");
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
+        Path logFile = tempDir.resolve("app/device.log");
         Files.writeString(logFile, "{\"type\":\"kernel_event\"}\n");
 
         CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
@@ -215,9 +251,15 @@ class LogTailerTest {
 
     @Test
     void tail_detects_rotation_and_offersToQueue(@TempDir Path tempDir) throws Exception {
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
         // Set up: active file exists; then we rename it to .1.log (simulating C++ rotation)
         // and create a new empty active file.
-        Path activeFile = tempDir.resolve("app.device.log");
+        Path activeFile = tempDir.resolve("app/device.log");
         Files.writeString(activeFile, "{\"type\":\"kernel_event\"}\n");
 
         LinkedBlockingQueue<Path> queue = new LinkedBlockingQueue<>();
@@ -234,7 +276,7 @@ class LogTailerTest {
         t.join(5000);
 
         // Simulate rotation: rename active → .1.log, create new empty active
-        Path rotatedFile = tempDir.resolve("app.device.1.log");
+        Path rotatedFile = tempDir.resolve("app/device.1.log");
         Files.move(activeFile, rotatedFile);
         Files.createFile(activeFile); // new empty active file
 
@@ -256,6 +298,12 @@ class LogTailerTest {
 
     @Test
     void tail_rotatedFileGone_fallsBackToActiveFile(@TempDir Path tempDir) throws Exception {
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
         // Simulate a cursor that points to fileIndex=1 (rotated), but the file no longer exists
         File cursorFile = tempDir.resolve("cursor.json").toFile();
         // Write a cursor that says we were reading rotated file index 1 at offset 0
@@ -268,7 +316,7 @@ class LogTailerTest {
             """);
 
         // Create only the active file (rotated .1.log is gone)
-        Path activeFile = tempDir.resolve("app.device.log");
+        Path activeFile = tempDir.resolve("app/device.log");
         Files.writeString(activeFile, "{\"type\":\"kernel_event\"}\n");
 
         CursorManager cursorMgr = new CursorManager(cursorFile);
@@ -288,15 +336,21 @@ class LogTailerTest {
 
     @Test
     void tail_readsGzRotatedFile(@TempDir Path tempDir) throws Exception {
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
         String content =
             "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n" +
             "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
-        Path plain = tempDir.resolve("app.device.1.log");
+        Path plain = tempDir.resolve("app/device.1.log");
         Files.writeString(plain, content);
-        Path gz = tempDir.resolve("app.device.1.log.gz");
+        Path gz = tempDir.resolve("app/device.1.log.gz");
         gzip(plain, gz);
         Files.delete(plain);                              // only the .gz remains
-        Files.createFile(tempDir.resolve("app.device.log")); // empty active so tailer doesn't just wait
+        Files.createFile(tempDir.resolve("app/device.log")); // empty active so tailer doesn't just wait
 
         File cursorFile = tempDir.resolve("cursor.json").toFile();
         Files.writeString(cursorFile.toPath(),
@@ -317,14 +371,20 @@ class LogTailerTest {
 
     @Test
     void tail_gzResumeFromOffset(@TempDir Path tempDir) throws Exception {
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
         String l1 = "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n";
         String l2 = "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
-        Path plain = tempDir.resolve("app.device.1.log");
+        Path plain = tempDir.resolve("app/device.1.log");
         Files.writeString(plain, l1 + l2);
-        Path gz = tempDir.resolve("app.device.1.log.gz");
+        Path gz = tempDir.resolve("app/device.1.log.gz");
         gzip(plain, gz);
         Files.delete(plain);
-        Files.createFile(tempDir.resolve("app.device.log"));
+        Files.createFile(tempDir.resolve("app/device.log"));
 
         long off = l1.getBytes(StandardCharsets.UTF_8).length; // start after the first line
         File cursorFile = tempDir.resolve("cursor.json").toFile();
@@ -349,7 +409,13 @@ class LogTailerTest {
 
     @Test
     void tail_restartAfterCompression_recoversUnreadTail(@TempDir Path tempDir) throws Exception {
-        Path active = tempDir.resolve("app.device.log");
+        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
+        // Create the session subdir so the tests' writeString calls don't
+        // hit "parent dir doesn't exist" errors. The "app" name is used
+        // throughout as the session_id below (it was the filePrefix in
+        // pre-v1.2 tests — same string, repurposed).
+        Files.createDirectories(tempDir.resolve("app"));
+        Path active = tempDir.resolve("app/device.log");
         String k1 = "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n";
         String k2 = "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
         Files.writeString(active, k1 + k2);
@@ -375,7 +441,7 @@ class LogTailerTest {
 
         // Simulate the client rotating AND immediately compressing: the old active
         // content lands in .1.log.gz, the active file is replaced with fresh content.
-        Path gz = tempDir.resolve("app.device.1.log.gz");
+        Path gz = tempDir.resolve("app/device.1.log.gz");
         gzip(active, gz);
         Files.delete(active);
         String k3 = "{\"type\":\"kernel_event\",\"name\":\"k3\"}\n";

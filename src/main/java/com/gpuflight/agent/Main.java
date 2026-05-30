@@ -72,9 +72,19 @@ public class Main {
         var executor = Executors.newVirtualThreadPerTaskExecutor();
         var deduplicator = new DeviceMetricDeduplicator();
 
-        for (LogSourceConfig source : allSources) {
-            var folder = new File(source.folder());
-            System.out.println("[agent] Source: folder=" + folder + " prefix=" + source.filePrefix()
+        // Set of "<folder>::<session_id>" keys already being tailed.
+        // ConcurrentHashMap.newKeySet() so the watcher thread (below)
+        // and the initial spawn can both insert without losing races.
+        var startedSessions = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
+
+        // Helper: spawn the per-channel tailer set for one session. Idempotent —
+        // a second call with the same (folder, sid) is a no-op so the periodic
+        // re-scan in the watcher below can call it freely.
+        java.util.function.BiConsumer<File, LogSourceConfig> spawnSessionTailers = (folder, source) -> {
+            String key = folder.getAbsolutePath() + "::" + source.filePrefix();
+            if (!startedSessions.add(key)) return;
+            System.out.println("[agent] Tailing session: folder=" + folder
+                               + " session=" + source.filePrefix()
                                + " types=" + source.logTypes());
             for (String type : source.logTypes()) {
                 executor.submit(() -> {
@@ -85,6 +95,61 @@ public class Main {
                     tailer.tail(publisher);
                 });
             }
+        };
+
+        // Initial spawn from the sources discovered at startup.
+        for (LogSourceConfig source : allSources) {
+            var folder = new File(source.folder());
+            spawnSessionTailers.accept(folder, source);
+        }
+
+        // New-session watcher. The agent must notice sessions that
+        // start AFTER it booted — without this, a long-running agent
+        // would only ship the sessions that existed at startup. We
+        // poll the parent folder(s) instead of inotify/ReadDirectoryChangesW
+        // for portability: a 2-second poll latency is negligible
+        // compared to typical session lifetimes (minutes), and the
+        // cost is one stat() per known subdir per tick.
+        //
+        // Watched folders = the union of:
+        //   - source.folder() of every initial source (covers --folder)
+        //   - every entry from --folders (already added above)
+        // We dedupe by absolute path so a folder watched by multiple
+        // sources only polls once.
+        var watchedFolders = new java.util.LinkedHashSet<File>();
+        for (LogSourceConfig source : allSources) {
+            File f = new File(source.folder());
+            // Watch the PARENT of the session subdir — that's where
+            // new sibling sessions appear. For explicit sources where
+            // folder is already the parent, that's the folder itself.
+            watchedFolders.add(f);
+        }
+        if (foldersRaw != null) {
+            for (String folderPath : foldersRaw.split(",")) {
+                folderPath = folderPath.trim();
+                if (!folderPath.isEmpty()) {
+                    watchedFolders.add(new File(folderPath));
+                }
+            }
+        }
+
+        for (File watched : watchedFolders) {
+            executor.submit(() -> {
+                while (!Thread.currentThread().isInterrupted()) {
+                    try {
+                        for (LogSourceConfig src : discoverSources(watched)) {
+                            spawnSessionTailers.accept(new File(src.folder()), src);
+                        }
+                        Thread.sleep(2_000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    } catch (Exception e) {
+                        System.err.println("[watcher] error scanning " +
+                                           watched + ": " + e.getMessage());
+                    }
+                }
+            });
         }
 
         if (config.archiver() != null) {
@@ -234,32 +299,78 @@ public class Main {
         return val;
     }
 
-    /** Log file name pattern: {prefix}.{type}.log */
-    private static final Pattern LOG_FILE_PATTERN =
-        Pattern.compile("^(.+)\\.(device|scope|system)\\.log$");
+    /**
+     * Per-session-subdirectory channel files under v1.2:
+     *   <folder>/<sessionId>/{device,scope,system}.log[.N.log[.gz]]
+     *
+     * Pattern matches the filenames INSIDE a session subdir (no prefix
+     * component). Used as a quick check that a candidate subdir looks
+     * like a gpufl session (vs. an unrelated user-created folder).
+     */
+    private static final Pattern CHANNEL_FILE_PATTERN =
+        Pattern.compile("^(device|scope|system)(?:\\.\\d+)?\\.log(?:\\.gz)?$");
 
     /**
-     * Scans a folder for gpufl log files and returns one LogSourceConfig
-     * per unique prefix found.  For example, if the folder contains
-     * {@code session.device.log} and {@code myapp.scope.log}, two configs
-     * are returned with prefixes "session" and "myapp".
+     * v1.2: scan {@code folder} for session subdirectories. Each subdir
+     * is a session — its name is the session_id; its contents are
+     * channel files matching {@link #CHANNEL_FILE_PATTERN}. Returns one
+     * {@link LogSourceConfig} per discovered session, with the source's
+     * {@code filePrefix} field repurposed to carry the session_id.
+     *
+     * <p>Subdirectories that don't look like sessions (no channel
+     * files inside) are silently skipped. Files at the top level of
+     * {@code folder} that match the pre-v1.2 flat pattern
+     * {@code <prefix>.<channel>.log} trigger a one-line warning so a
+     * user upgrading from v1.1 sees the migration hint.
      */
     static List<LogSourceConfig> discoverSources(File folder) {
         List<LogSourceConfig> result = new ArrayList<>();
         if (!folder.isDirectory()) return result;
 
-        Set<String> prefixes = new LinkedHashSet<>();
-        File[] files = folder.listFiles();
-        if (files == null) return result;
-
-        for (File f : files) {
-            Matcher m = LOG_FILE_PATTERN.matcher(f.getName());
-            if (m.matches()) prefixes.add(m.group(1));
+        // Legacy-format warning: if there are pre-v1.2 flat files at
+        // the folder's top level, the agent won't see them — the new
+        // discovery walks subdirs only.
+        Pattern legacyTop = Pattern.compile(
+            "^(.+)\\.(device|scope|system)(?:\\.\\d+)?\\.log(?:\\.gz)?$");
+        File[] topFiles = folder.listFiles();
+        if (topFiles != null) {
+            for (File f : topFiles) {
+                if (f.isFile() && legacyTop.matcher(f.getName()).matches()) {
+                    System.err.println(
+                        "[agent] warning: found pre-v1.2 flat log file '" +
+                        f.getName() + "' at top level of " + folder +
+                        ". v1.2 expects <session_id>/<channel>.log " +
+                        "under that folder. Re-run with a v1.2 gpufl client " +
+                        "or migrate old files into a session subdirectory.");
+                    break;  // one warning is enough
+                }
+            }
         }
 
-        for (String prefix : prefixes) {
-            System.out.println("[agent] Discovered prefix \"" + prefix + "\" in " + folder);
-            result.add(new LogSourceConfig(folder.getAbsolutePath(), prefix, null));
+        File[] subdirs = folder.listFiles(File::isDirectory);
+        if (subdirs == null) return result;
+        java.util.Arrays.sort(subdirs, java.util.Comparator.comparing(File::getName));
+
+        for (File subdir : subdirs) {
+            if (subdir.getName().startsWith(".")) continue;  // skip dotdirs
+            File[] inside = subdir.listFiles();
+            if (inside == null) continue;
+            boolean looksLikeSession = false;
+            for (File child : inside) {
+                if (child.isFile() &&
+                    CHANNEL_FILE_PATTERN.matcher(child.getName()).matches()) {
+                    looksLikeSession = true;
+                    break;
+                }
+            }
+            if (!looksLikeSession) continue;
+            System.out.println("[agent] Discovered session \"" + subdir.getName() +
+                               "\" in " + folder);
+            // filePrefix carries the session_id — see LogTailer's
+            // constructor, which treats the second arg as session_id
+            // (renamed from the v1.1 filePrefix).
+            result.add(new LogSourceConfig(folder.getAbsolutePath(),
+                                            subdir.getName(), null));
         }
         return result;
     }
