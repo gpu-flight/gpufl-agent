@@ -131,8 +131,7 @@ class MainTest {
             AgentConfig config = Main.loadFromArgs(new String[]{});
             assertNotNull(config);
             assertNotNull(config.source());
-            // local.json has filePrefix "sass_divergence"
-            assertEquals("session", config.source().filePrefix());
+            assertEquals(".", config.source().folder());
             assertNotNull(config.publisher());
             assertNull(config.archiver());
         }
@@ -149,7 +148,6 @@ class MainTest {
         AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         assertNotNull(config);
         assertEquals("/var/log", config.source().folder());
-        assertEquals("gpufl", config.source().filePrefix()); // default prefix
         assertInstanceOf(HttpConfig.class, config.publisher());
         HttpConfig http = (HttpConfig) config.publisher();
         assertEquals("http://localhost:8080", http.hostUrl());
@@ -180,16 +178,6 @@ class MainTest {
         AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
         HttpConfig http = (HttpConfig) config.publisher();
         assertEquals(30L, http.timeoutSeconds());
-    }
-
-    @Test
-    void loadFromArgs_httpPublisher_customPrefix() {
-        String[] args = {
-            "--folder=/logs", "--prefix=myapp", "--type=http",
-            "--host=http://localhost"
-        };
-        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
-        assertEquals("myapp", config.source().filePrefix());
     }
 
     // ---- loadFromArgs() — Kafka publisher ----
@@ -312,7 +300,6 @@ class MainTest {
 
         assertNotNull(config);
         assertEquals("/tmp/ext", config.source().folder());
-        assertEquals("extapp", config.source().filePrefix());
         assertInstanceOf(HttpConfig.class, config.publisher());
     }
 
@@ -388,9 +375,7 @@ class MainTest {
         assertNotNull(config.sources());
         assertEquals(2, config.sources().size());
         assertEquals("/logs/app1", config.sources().get(0).folder());
-        assertEquals("app1", config.sources().get(0).filePrefix());
         assertEquals("/logs/app2", config.sources().get(1).folder());
-        assertEquals("app2", config.sources().get(1).filePrefix());
     }
 
     @Test
@@ -447,7 +432,7 @@ class MainTest {
         AgentConfig config = (AgentConfig) m.invoke(null, "config/local.json");
 
         assertNotNull(config);
-        assertEquals("session", config.source().filePrefix());
+        assertEquals(".", config.source().folder());
     }
 
     // ---- printUsage() — smoke test ----

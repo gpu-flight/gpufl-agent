@@ -10,21 +10,20 @@ class LogSourceConfigTest {
 
     @Test
     void nullFolder_defaultsToDot() {
-        LogSourceConfig config = new LogSourceConfig(null, "myapp", null);
+        LogSourceConfig config = new LogSourceConfig(null, null);
         assertEquals(".", config.folder());
     }
 
     @Test
-    void nullFilePrefix_defaultsToGpufl() {
-        LogSourceConfig config = new LogSourceConfig("/logs", null, null);
-        assertEquals("gpufl", config.filePrefix());
+    void nullLogTypes_defaultsToAllChannels() {
+        LogSourceConfig config = new LogSourceConfig("/logs", null);
+        assertEquals(List.of("device", "scope", "system"), config.logTypes());
     }
 
     @Test
     void explicitValues_preserved() {
-        LogSourceConfig config = new LogSourceConfig("/var/log", "sass_divergence", null);
+        LogSourceConfig config = new LogSourceConfig("/var/log", List.of("device"));
         assertEquals("/var/log", config.folder());
-        assertEquals("sass_divergence", config.filePrefix());
-        assertEquals(List.of("device", "scope", "system"), config.logTypes());
+        assertEquals(List.of("device"), config.logTypes());
     }
 }
