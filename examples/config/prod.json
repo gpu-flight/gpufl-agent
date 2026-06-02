@@ -1,8 +1,7 @@
 {
   "sources": [
     {
-      "folder": "/var/log/gpuflight",
-      "filePrefix": "production_app"
+      "folder": "/var/log/gpuflight"
     }
   ],
   "publisher": {

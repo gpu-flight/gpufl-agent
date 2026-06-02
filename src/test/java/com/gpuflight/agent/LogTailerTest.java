@@ -462,4 +462,72 @@ class LogTailerTest {
         assertTrue(datas.stream().anyMatch(d -> d.contains("k3")),
                 "k3 from the new active file should also be read");
     }
+
+    // ---- compressed-active: a cleanly-shut-down session whose active file
+    //      was compressed IN PLACE to <channel>.log.gz (no rotation index) ----
+
+    @Test
+    void tail_drainsCompressedActiveFile(@TempDir Path tempDir) throws Exception {
+        // On a clean shutdown the client compresses the active <channel>.log in
+        // place to <channel>.log.gz and removes the .log — there is no .log and
+        // no .N.log.gz. The tailer must still ingest this finished session.
+        Files.createDirectories(tempDir.resolve("app"));
+        String content =
+            "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n" +
+            "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
+        Path plain = tempDir.resolve("app/device.log");
+        Files.writeString(plain, content);
+        Path gz = tempDir.resolve("app/device.log.gz");
+        gzip(plain, gz);
+        Files.delete(plain); // only the compressed-active .log.gz remains
+
+        LinkedBlockingQueue<Path> queue = new LinkedBlockingQueue<>();
+        CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
+        CapturingPublisher publisher = new CapturingPublisher();
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, queue);
+
+        Thread t = startTailer(tailer, publisher);
+        awaitEvents(publisher.events, 2, 3000);
+        Path consumed = queue.poll(3, TimeUnit.SECONDS);
+        t.interrupt();
+        t.join(2000);
+
+        assertEquals(2, publisher.events.size(),
+                "Both lines should be read from the compressed-active .log.gz");
+        assertNotNull(consumed, "Compressed-active file should be offered to the archive queue");
+        assertEquals(gz.toAbsolutePath(), consumed.toAbsolutePath());
+    }
+
+    @Test
+    void tail_compressedActive_resumesFromOffset(@TempDir Path tempDir) throws Exception {
+        // Live-tail handoff: we'd already published k1 from <channel>.log when the
+        // client compressed it in place. Resuming from the saved offset must yield
+        // only the unread tail (k2) — no duplicate of k1.
+        Files.createDirectories(tempDir.resolve("app"));
+        String l1 = "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n";
+        String l2 = "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
+        Path plain = tempDir.resolve("app/device.log");
+        Files.writeString(plain, l1 + l2);
+        Path gz = tempDir.resolve("app/device.log.gz");
+        gzip(plain, gz);
+        Files.delete(plain);
+
+        long off = l1.getBytes(StandardCharsets.UTF_8).length; // resume after k1
+        File cursorFile = tempDir.resolve("cursor.json").toFile();
+        Files.writeString(cursorFile.toPath(),
+            "{\"streams\":{\"app.device\":{\"fileIndex\":0,\"offset\":" + off + "}}}");
+
+        CursorManager cursorMgr = new CursorManager(cursorFile);
+        CapturingPublisher publisher = new CapturingPublisher();
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
+                cursorMgr, new LinkedBlockingQueue<>());
+
+        Thread t = startTailer(tailer, publisher);
+        awaitEvents(publisher.events, 1, 3000);
+        t.interrupt();
+        t.join(2000);
+
+        assertEquals(1, publisher.events.size(), "Only the tail after the offset should be read");
+        assertTrue(publisher.events.get(0).data().contains("k2"));
+    }
 }

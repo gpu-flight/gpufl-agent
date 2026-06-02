@@ -97,6 +97,20 @@ public class LogTailer {
     }
 
     /**
+     * The compressed-active file: {@code <folder>/<sessionId>/<channel>.log.gz}.
+     * On a CLEAN SHUTDOWN the client compresses the active file IN PLACE — the
+     * name keeps the channel base with NO rotation index (active {@code
+     * <channel>.log} → {@code <channel>.log.gz}), distinct from a rotated
+     * {@code <channel>.<N>.log.gz}. A finished session's only data for a channel
+     * therefore lives here, and there is never a plain {@code <channel>.log}
+     * alongside it. The tail loop falls back to this when the active file is
+     * gone so finished sessions are still ingested.
+     */
+    private File activeGzFile() {
+        return new File(sessionDir(), logType + ".log.gz");
+    }
+
+    /**
      * The rotated file for {@code index} (≥1). Prefers the uncompressed
      * {@code .index.log}; falls back to {@code .index.log.gz} once the client
      * has compressed it. Returns null if neither exists.
@@ -166,6 +180,12 @@ public class LogTailer {
     private int locateByIdentity(CursorPosition saved) {
         File active = activeFile();
         if (active.exists() && identityMatches(saved, identityOf(active))) return 0;
+        // The active file we were reading may have been compressed in place to
+        // <channel>.log.gz at shutdown. Its content signature is unchanged
+        // (headSignature decompresses transparently), so it still resolves to
+        // the active slot (index 0) and the loop's active branch drains it.
+        File activeGz = activeGzFile();
+        if (activeGz.exists() && identityMatches(saved, identityOf(activeGz))) return 0;
         for (int i = 1; i <= MAX_ROTATED_SCAN; i++) {
             File r = resolveRotated(i);
             if (r == null) continue;
@@ -224,6 +244,29 @@ public class LogTailer {
                 continue;
             }
             if (idx == 0 && !file.exists()) {
+                // The active <channel>.log is gone. On a clean shutdown the
+                // client compresses the active file IN PLACE to
+                // <channel>.log.gz (no rotation index), so a finished session's
+                // only data for this channel lives there. Drain it once from
+                // our current offset: drainGz skips already-read uncompressed
+                // bytes, so this is correct whether we discovered the session
+                // cold (offset 0 → whole file) or were live-tailing
+                // <channel>.log when it was compressed at shutdown (offset =
+                // bytes already published → just the tail).
+                File activeGz = activeGzFile();
+                if (activeGz.exists()) {
+                    long resume = drainGz(activeGz, offset, publisher, 0);
+                    if (resume < 0) {
+                        System.out.println("[" + logType + "] Drained compressed-active "
+                                + activeGz.getName() + " – session finished.");
+                        if (consumedFilesQueue != null) consumedFilesQueue.offer(activeGz.toPath());
+                        return; // compressed-active is terminal: no more data will arrive
+                    }
+                    // Publish failed mid-drain — back off, retry from persisted offset.
+                    offset = resume;
+                    sleep(5000);
+                    continue;
+                }
                 sleep(1000);
                 continue;
             }

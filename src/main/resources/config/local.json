@@ -1,7 +1,6 @@
 {
   "source": {
-    "folder": "",
-    "filePrefix": "session"
+    "folder": "."
   },
   "publisher": {
     "type": "http",
