@@ -14,6 +14,7 @@ import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -73,6 +74,31 @@ class MainTest {
         String[] args = {"--host=http://cli-url.com"};
         Map<String, String> env = Map.of("GPUFL_HTTP_HOST", "http://env-url.com");
         assertEquals("http://cli-url.com", Main.resolve(args, "host", "GPUFL_HTTP_HOST", null, env));
+    }
+
+    // ---- log type parsing ----
+
+    @Test
+    void parseLogTypes_trimsAndDropsEmptyValues() {
+        assertEquals(List.of("system", "device"), Main.parseLogTypes(" system, ,device,"));
+    }
+
+    @Test
+    void parseLogTypes_returnsNullForMissingOrEmptyValues() {
+        assertNull(Main.parseLogTypes(null));
+        assertNull(Main.parseLogTypes(" , "));
+    }
+
+    @Test
+    void logTypesOrDefault_usesExplicitFolderLogTypes() {
+        String[] args = {"--folders=/logs", "--log-types=system"};
+        assertEquals(List.of("system"), Main.logTypesOrDefault(args, Collections.emptyMap()));
+    }
+
+    @Test
+    void logTypesOrDefault_usesDefaultWhenAbsent() {
+        assertEquals(List.of("device", "scope", "system"),
+            Main.logTypesOrDefault(new String[]{}, Collections.emptyMap()));
     }
 
     // ---- require() ----

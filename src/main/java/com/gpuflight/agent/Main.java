@@ -51,11 +51,12 @@ public class Main {
         }
 
         String foldersRaw = resolve(args, "folders", "GPUFL_SOURCE_FOLDERS", null);
+        List<String> folderLogTypes = logTypesOrDefault(args, System.getenv());
         if (foldersRaw != null) {
             for (String folderPath : foldersRaw.split(",")) {
                 folderPath = folderPath.trim();
                 if (!folderPath.isEmpty()) {
-                    watchedFolders.putIfAbsent(new File(folderPath), DEFAULT_LOG_TYPES);
+                    watchedFolders.putIfAbsent(new File(folderPath), folderLogTypes);
                 }
             }
         }
@@ -194,9 +195,7 @@ public class Main {
             System.exit(1);
         }
         String logTypesRaw = resolve(args, "log-types", "GPUFL_LOG_TYPES", null, env);
-        List<String> logTypes = logTypesRaw != null
-            ? Arrays.stream(logTypesRaw.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList()
-            : null; // null → LogSourceConfig compact constructor applies the default
+        List<String> logTypes = parseLogTypes(logTypesRaw); // null → LogSourceConfig applies the default
         String type   = require(args, "type",   "GPUFL_PUBLISHER_TYPE", env);
 
         // Reject the legacy --url / GPUFL_HTTP_URL flag with a migration
@@ -248,6 +247,20 @@ public class Main {
         LogSourceConfig source = folder != null
             ? new LogSourceConfig(folder, logTypes) : null;
         return new AgentConfig(source, null, publisher, archiver);
+    }
+
+    static List<String> parseLogTypes(String raw) {
+        if (raw == null) return null;
+        List<String> parsed = Arrays.stream(raw.split(","))
+            .map(String::trim)
+            .filter(s -> !s.isEmpty())
+            .toList();
+        return parsed.isEmpty() ? null : parsed;
+    }
+
+    static List<String> logTypesOrDefault(String[] args, Map<String, String> env) {
+        List<String> parsed = parseLogTypes(resolve(args, "log-types", "GPUFL_LOG_TYPES", null, env));
+        return parsed == null ? DEFAULT_LOG_TYPES : parsed;
     }
 
     /**
