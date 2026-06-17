@@ -2,22 +2,24 @@ package com.gpuflight.agent.config;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 
+import java.util.Locale;
+
 /**
  * Configuration for the HTTP publisher.
  *
- * <p>The destination is split across {@code hostUrl} + {@code apiVersion} —
+ * <p>The destination is split across {@code hostUrl} + {@code apiVersion};
  * the full path is built internally via {@link #endpointFor(String)} so
- * the user only specifies what changes per-deployment (the host) and
- * occasionally per-rollout (the version). The {@code /api/{version}/events/}
+ * the user only specifies what changes per deployment (the host) and
+ * occasionally per rollout (the version). The {@code /api/{version}/events/}
  * path is a structural contract baked into this record.
  *
  * <p>Examples:
  * <pre>
  *   hostUrl="https://api.gpuflight.com"     apiVersion="v1"
- *     → endpointFor("init") = "https://api.gpuflight.com/api/v1/events/init"
+ *     endpointFor("init") = "https://api.gpuflight.com/api/v1/events/init"
  *
  *   hostUrl="http://localhost:8080"         apiVersion="v2"
- *     → endpointFor("init") = "http://localhost:8080/api/v2/events/init"
+ *     endpointFor("init") = "http://localhost:8080/api/v2/events/init"
  * </pre>
  *
  * <p><strong>Migration note (May 2026):</strong> previous releases used a
@@ -33,23 +35,53 @@ public record HttpConfig(
     @JsonProperty("hostUrl")        String hostUrl,
     @JsonProperty("apiVersion")     String apiVersion,
     @JsonProperty("authToken")      String authToken,
-    @JsonProperty("timeoutSeconds") long   timeoutSeconds
+    @JsonProperty("timeoutSeconds") long   timeoutSeconds,
+    @JsonProperty("uploadMode")     String uploadMode,
+    @JsonProperty("streamMaxLines") int    streamMaxLines,
+    @JsonProperty("streamMaxBytes") long   streamMaxBytes
 ) implements PublisherConfig {
 
     /** Default API version when the user doesn't specify one. */
     public static final String DEFAULT_API_VERSION = "v1";
+    public static final String DEFAULT_UPLOAD_MODE = "stream";
+    public static final int DEFAULT_STREAM_MAX_LINES = 5_000;
+    public static final long DEFAULT_STREAM_MAX_BYTES = 1_000_000L;
+
+    private static final String LEGACY_UPLOAD_MODE = "legacy";
+
+    public HttpConfig(String hostUrl, String apiVersion, String authToken, long timeoutSeconds) {
+        this(hostUrl, apiVersion, authToken, timeoutSeconds, DEFAULT_UPLOAD_MODE, 0, 0);
+    }
 
     public HttpConfig {
         // Field-level defaults / normalization. Run inside the compact
-        // constructor so they apply to BOTH the JSON-deserialized path
-        // (via Jackson) and any direct callers (tests, CLI plumbing).
-
+        // constructor so they apply to both JSON deserialization and direct callers.
         if (timeoutSeconds <= 0) {
             timeoutSeconds = 10L;
         }
         if (apiVersion == null || apiVersion.isBlank()) {
             apiVersion = DEFAULT_API_VERSION;
         }
+        if (uploadMode == null || uploadMode.isBlank()) {
+            uploadMode = DEFAULT_UPLOAD_MODE;
+        }
+        uploadMode = uploadMode.trim().toLowerCase(Locale.ROOT);
+        if (!DEFAULT_UPLOAD_MODE.equals(uploadMode) && !LEGACY_UPLOAD_MODE.equals(uploadMode)) {
+            throw new IllegalArgumentException(
+                "HttpConfig.uploadMode must be 'stream' or 'legacy', got: " + uploadMode);
+        }
+        if (DEFAULT_UPLOAD_MODE.equals(uploadMode)) {
+            if (streamMaxLines <= 0) {
+                streamMaxLines = DEFAULT_STREAM_MAX_LINES;
+            }
+            if (streamMaxBytes <= 0) {
+                streamMaxBytes = DEFAULT_STREAM_MAX_BYTES;
+            }
+        } else {
+            streamMaxLines = 0;
+            streamMaxBytes = 0L;
+        }
+
         // Hard reject blank/missing host with a migration-aware error.
         // Jackson silently sets unknown fields to null (we disabled
         // FAIL_ON_UNKNOWN_PROPERTIES in JsonSettings), so a config that
@@ -73,11 +105,19 @@ public record HttpConfig(
         }
     }
 
+    public boolean isStreamMode() {
+        return DEFAULT_UPLOAD_MODE.equals(uploadMode);
+    }
+
+    public String streamEndpoint() {
+        return endpointFor(DEFAULT_UPLOAD_MODE);
+    }
+
     /**
      * Build the full upload URL for a given event type.
      *
      * @param type the event-type segment, e.g. {@code "init"},
-     *             {@code "kernel"}, {@code "metric"} — appended after
+     *             {@code "kernel"}, {@code "metric"}; appended after
      *             the {@code /api/{version}/events/} prefix.
      */
     public String endpointFor(String type) {

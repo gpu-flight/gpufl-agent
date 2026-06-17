@@ -7,10 +7,14 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.GZIPInputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -21,13 +25,26 @@ class HttpPublisherTest {
     private final AtomicInteger statusToReturn = new AtomicInteger(200);
     private final AtomicReference<String> lastBody = new AtomicReference<>();
     private final AtomicReference<String> lastAuthHeader = new AtomicReference<>();
+    private final AtomicReference<String> lastContentEncoding = new AtomicReference<>();
+    private final AtomicReference<String> lastContentType = new AtomicReference<>();
+    private final AtomicReference<String> lastPath = new AtomicReference<>();
+    private final AtomicReference<String> lastSessionId = new AtomicReference<>();
 
     @BeforeEach
     void startServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress(0), 0);
         server.createContext("/api/", exchange -> {
-            lastBody.set(new String(exchange.getRequestBody().readAllBytes()));
-            lastAuthHeader.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            var headers = exchange.getRequestHeaders();
+            byte[] body = exchange.getRequestBody().readAllBytes();
+            String encoding = headers.getFirst("Content-Encoding");
+            lastBody.set("gzip".equalsIgnoreCase(encoding)
+                ? gunzip(body)
+                : new String(body, StandardCharsets.UTF_8));
+            lastAuthHeader.set(headers.getFirst("Authorization"));
+            lastContentEncoding.set(encoding);
+            lastContentType.set(headers.getFirst("Content-Type"));
+            lastPath.set(exchange.getRequestURI().getPath());
+            lastSessionId.set(headers.getFirst("X-GpuFlight-Session-Id"));
             exchange.sendResponseHeaders(statusToReturn.get(), 0);
             exchange.close();
         });
@@ -53,6 +70,12 @@ class HttpPublisherTest {
 
     private LogWrapper sampleLog(String type) {
         return new LogWrapper(System.currentTimeMillis(), "{\"key\":\"val\"}", type, "testhost", "127.0.0.1");
+    }
+
+    private static String gunzip(byte[] body) throws IOException {
+        try (var gzip = new GZIPInputStream(new ByteArrayInputStream(body))) {
+            return new String(gzip.readAllBytes(), StandardCharsets.UTF_8);
+        }
     }
 
     @Test
@@ -88,6 +111,36 @@ class HttpPublisherTest {
         Thread.sleep(300);
 
         assertNull(lastAuthHeader.get());
+    }
+
+    @Test
+    void publish_blankToken_doesNotSendAuthHeader() {
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", "", 5);
+        HttpPublisher pub = new HttpPublisher(config);
+
+        pub.publish("topic", "system", sampleLog("system_event"));
+
+        assertNull(lastAuthHeader.get());
+    }
+
+    @Test
+    void publishStream_sendsGzippedNdjsonBatch() {
+        statusToReturn.set(202);
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5,
+                "stream", 100, 1_000_000L);
+        HttpPublisher pub = new HttpPublisher(config);
+
+        boolean ok = pub.publishStream("session-1", List.of(
+            "{\"type\":\"kernel_event\",\"session_id\":\"session-1\"}",
+            "{\"type\":\"scope_event\",\"session_id\":\"session-1\"}"));
+
+        assertTrue(ok);
+        assertEquals("/api/v1/events/stream", lastPath.get());
+        assertEquals("gzip", lastContentEncoding.get());
+        assertEquals("application/x-ndjson", lastContentType.get());
+        assertEquals("session-1", lastSessionId.get());
+        assertTrue(lastBody.get().contains("\"kernel_event\""));
+        assertTrue(lastBody.get().endsWith("\n"));
     }
 
     @Test

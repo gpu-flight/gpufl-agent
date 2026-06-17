@@ -4,6 +4,7 @@ import com.gpuflight.agent.config.HttpConfig;
 import com.gpuflight.agent.config.JsonSettings;
 import com.gpuflight.agent.config.KafkaConfig;
 import com.gpuflight.agent.config.PublisherConfig;
+import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.model.AgentConfig;
 import com.gpuflight.agent.model.ArchiverConfig;
 import com.gpuflight.agent.model.LogSourceConfig;
@@ -31,7 +32,7 @@ public class Main {
         Publisher publisher = PublisherFactory.create(config.publisher());
         System.out.println("[agent] Publisher: " + config.publisher().getClass().getSimpleName());
 
-        // In v1.2 a "source" is just a FOLDER to watch — each run writes its
+        // In v1.2 a "source" is just a FOLDER to watch - each run writes its
         // logs under <folder>/<session_id>/<channel>.log[.gz], so sessions are
         // auto-discovered (no per-session config). Collect every folder to
         // watch with its channel filter (logTypes); we discover + tail the
@@ -62,7 +63,7 @@ public class Main {
         }
 
         if (watchedFolders.isEmpty()) {
-            System.err.println("❌ No log sources configured (set --folder, --folders, or GPUFL_SOURCE_FOLDERS)");
+            System.err.println("ERROR: No log sources configured (set --folder, --folders, or GPUFL_SOURCE_FOLDERS)");
             System.exit(1);
         }
 
@@ -71,6 +72,15 @@ public class Main {
         var consumedFilesQueue = new LinkedBlockingQueue<Path>();
 
         String topicPrefix = topicPrefix(config);
+        StreamUploadSettings streamUploadSettings = switch (config.publisher()) {
+            case HttpConfig http -> StreamUploadSettings.from(http);
+            default -> StreamUploadSettings.DISABLED;
+        };
+        if (streamUploadSettings.enabled()) {
+            System.out.println("[agent] HTTP upload mode: stream"
+                + " maxLines=" + streamUploadSettings.maxLines()
+                + " maxBytes=" + streamUploadSettings.maxBytes());
+        }
 
         var executor = Executors.newVirtualThreadPerTaskExecutor();
         var deduplicator = new DeviceMetricDeduplicator();
@@ -80,12 +90,12 @@ public class Main {
         // initial spawn can all insert without losing races. A session is
         // announced + spawned exactly once; the 2s rescan is then a no-op for
         // it. (With the compressed-active drain in LogTailer, a finished
-        // session's tailers exit on their own once drained — they are never
+        // session's tailers exit on their own once drained - they are never
         // re-watched, so this set also marks "done" for the agent's lifetime.)
         var startedSessions = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
 
         // Spawn the per-channel tailer set for one discovered session.
-        // Idempotent — a second call for the same (folder, session_id) is a
+        // Idempotent - a second call for the same (folder, session_id) is a
         // no-op, so the rescan can call it freely without re-announcing.
         java.util.function.Consumer<DiscoveredSession> spawnSessionTailers = (session) -> {
             String key = session.folder().getAbsolutePath() + "::" + session.sessionId();
@@ -97,7 +107,8 @@ public class Main {
                     // Only the "system" channel carries device_metric_batch events.
                     var dedup = "system".equals(type) ? deduplicator : null;
                     var tailer = new LogTailer(session.folder(), session.sessionId(), type,
-                                               topicPrefix, cursorMgr, consumedFilesQueue, dedup);
+                                               topicPrefix, cursorMgr, consumedFilesQueue, dedup,
+                                               streamUploadSettings);
                     tailer.tail(publisher);
                 });
             }
@@ -111,7 +122,7 @@ public class Main {
         }
 
         // New-session watcher. The agent must notice sessions that start AFTER
-        // it booted — without this, a long-running agent would only ship the
+        // it booted - without this, a long-running agent would only ship the
         // sessions that existed at startup. We poll each watched folder (2s)
         // instead of inotify/ReadDirectoryChangesW for portability: the latency
         // is negligible vs. typical session lifetimes, and the cost is one
@@ -156,7 +167,7 @@ public class Main {
         }
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            System.out.println("Shutting down…");
+            System.out.println("Shutting down...");
             executor.shutdownNow();
             try { publisher.close(); } catch (Exception ignored) {}
         }));
@@ -171,7 +182,7 @@ public class Main {
 
     /**
      * Builds AgentConfig from CLI flags and/or environment variables.
-     * Resolution order per field: CLI flag → env var → default.
+     * Resolution order per field: CLI flag -> env var -> default.
      * Falls back to the bundled local.json when no flags or GPUFL_* vars are present.
      */
     static AgentConfig loadFromArgs(String[] args) {
@@ -183,19 +194,19 @@ public class Main {
             || env.keySet().stream().anyMatch(k -> k.startsWith("GPUFL_"));
 
         if (!hasAnyConfig) {
-            System.out.println("No flags or GPUFL_* env vars found — using bundled local.json");
+            System.out.println("No flags or GPUFL_* env vars found - using bundled local.json");
             return loadClasspathConfig("config/local.json");
         }
 
         String folder = resolve(args, "folder", "GPUFL_SOURCE_FOLDER", null, env);
         String foldersEnv = resolve(args, "folders", "GPUFL_SOURCE_FOLDERS", null, env);
         if (folder == null && foldersEnv == null) {
-            System.err.println("❌ --folder (or env GPUFL_SOURCE_FOLDER) or --folders (or env GPUFL_SOURCE_FOLDERS) is required");
+            System.err.println("ERROR: --folder (or env GPUFL_SOURCE_FOLDER) or --folders (or env GPUFL_SOURCE_FOLDERS) is required");
             printUsage();
             System.exit(1);
         }
         String logTypesRaw = resolve(args, "log-types", "GPUFL_LOG_TYPES", null, env);
-        List<String> logTypes = parseLogTypes(logTypesRaw); // null → LogSourceConfig applies the default
+        List<String> logTypes = parseLogTypes(logTypesRaw); // null -> LogSourceConfig applies the default
         String type   = require(args, "type",   "GPUFL_PUBLISHER_TYPE", env);
 
         // Reject the legacy --url / GPUFL_HTTP_URL flag with a migration
@@ -203,10 +214,10 @@ public class Main {
         // HttpConfig javadoc). Without this explicit check the user
         // would silently lose the URL value (resolve() would return
         // null for the new --host name) and hit the IllegalArgumentException
-        // out of HttpConfig's compact constructor — same outcome but
+        // out of HttpConfig's compact constructor - same outcome but
         // less obvious about WHICH legacy flag is at fault.
         if (resolve(args, "url", "GPUFL_HTTP_URL", null, env) != null) {
-            System.err.println("❌ --url / GPUFL_HTTP_URL is no longer supported.");
+            System.err.println("ERROR: --url / GPUFL_HTTP_URL is no longer supported.");
             System.err.println("   Use --host=<scheme://host[:port]>      (or env GPUFL_HTTP_HOST)");
             System.err.println("       --api-version=<v1|v2|...>          (or env GPUFL_HTTP_API_VERSION, default: v1)");
             System.err.println("   The /api/{version}/events/ path is now built automatically.");
@@ -217,14 +228,17 @@ public class Main {
                 require(args, "host",          "GPUFL_HTTP_HOST", env),
                 resolve(args, "api-version",   "GPUFL_HTTP_API_VERSION", HttpConfig.DEFAULT_API_VERSION, env),
                 resolve(args, "token",         "GPUFL_HTTP_TOKEN", null, env),
-                Long.parseLong(resolve(args, "timeout", "GPUFL_HTTP_TIMEOUT_SEC", "10", env)));
+                Long.parseLong(resolve(args, "timeout", "GPUFL_HTTP_TIMEOUT_SEC", "10", env)),
+                resolve(args, "upload-mode",   "GPUFL_AGENT_UPLOAD_MODE", HttpConfig.DEFAULT_UPLOAD_MODE, env),
+                Integer.parseInt(resolve(args, "stream-max-lines", "GPUFL_AGENT_STREAM_MAX_LINES", "0", env)),
+                Long.parseLong(resolve(args, "stream-max-bytes", "GPUFL_AGENT_STREAM_MAX_BYTES", "0", env)));
             case "kafka" -> new KafkaConfig(
                 require(args, "brokers",        "GPUFL_KAFKA_BROKERS", env),
                 resolve(args, "topic-prefix",   "GPUFL_KAFKA_TOPIC_PREFIX", null, env),
                 resolve(args, "compression",    "GPUFL_KAFKA_COMPRESSION", null, env),
                 Integer.parseInt(resolve(args, "kafka-linger-ms", "GPUFL_KAFKA_LINGER_MS", "0", env)));
             default -> {
-                System.err.println("❌ Unknown publisher type: '" + type + "' (expected: http, kafka)");
+                System.err.println("ERROR: Unknown publisher type: '" + type + "' (expected: http, kafka)");
                 printUsage();
                 System.exit(1);
                 yield null; // unreachable
@@ -288,7 +302,7 @@ public class Main {
     static String require(String[] args, String flag, String envVar, Map<String, String> env) {
         String val = resolve(args, flag, envVar, null, env);
         if (val == null) {
-            System.err.println("❌ --" + flag + " (or env " + envVar + ") is required");
+            System.err.println("ERROR: --" + flag + " (or env " + envVar + ") is required");
             printUsage();
             System.exit(1);
         }
@@ -297,14 +311,14 @@ public class Main {
 
     /**
      * Per-session-subdirectory channel files under v1.2:
-     *   <folder>/<sessionId>/{device,scope,system}.log[.N.log[.gz]]
+     *   <folder>/<sessionId>/{device,scope,system,sass}.log[.N.log[.gz]]
      *
      * Pattern matches the filenames INSIDE a session subdir (no prefix
      * component). Used as a quick check that a candidate subdir looks
      * like a gpufl session (vs. an unrelated user-created folder).
      */
     private static final Pattern CHANNEL_FILE_PATTERN =
-        Pattern.compile("^(device|scope|system)(?:\\.\\d+)?\\.log(?:\\.gz)?$");
+        Pattern.compile("^(device|scope|system|sass)(?:\\.\\d+)?\\.log(?:\\.gz)?$");
 
     /** Folders we've already emitted the pre-v1.2 migration warning for.
      *  {@link #discoverSources} runs on a 2-second rescan loop, so without
@@ -313,8 +327,11 @@ public class Main {
     private static final java.util.Set<String> warnedLegacyFolders =
         java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    /** Default channels to tail when a source doesn't restrict them. */
-    private static final List<String> DEFAULT_LOG_TYPES = List.of("device", "scope", "system");
+    /** Default channels to tail when a source doesn't restrict them.
+     *  "sass" carries the bulky SASS-disassembly / source-content artifacts
+     *  split out of device.log; it must be tailed or those artifacts miss
+     *  live upload. */
+    private static final List<String> DEFAULT_LOG_TYPES = List.of("device", "scope", "system", "sass");
 
     /** A session found under a watched folder: the folder, the session_id
      *  (the subdir name), and the channels to tail. Carries the session_id
@@ -323,7 +340,7 @@ public class Main {
 
     /**
      * v1.2: scan {@code folder} for session subdirectories. Each subdir is a
-     * session — its name is the session_id; its contents are channel files
+     * session - its name is the session_id; its contents are channel files
      * matching {@link #CHANNEL_FILE_PATTERN}. Returns one
      * {@link DiscoveredSession} per discovered session, each carrying the
      * given {@code logTypes} (or the default channels when null/empty).
@@ -333,7 +350,7 @@ public class Main {
      * that match the pre-v1.2 flat pattern {@code <prefix>.<channel>.log}
      * trigger a one-time warning so a user upgrading from v1.1 sees the
      * migration hint. The per-session announcement happens once in
-     * spawnSessionTailers, NOT here — this method runs on a 2s rescan loop, so
+     * spawnSessionTailers, NOT here - this method runs on a 2s rescan loop, so
      * logging a "discovered" line per session every tick would just spam.
      */
     static List<DiscoveredSession> discoverSources(File folder, List<String> logTypes) {
@@ -343,16 +360,16 @@ public class Main {
         List<String> types = (logTypes == null || logTypes.isEmpty()) ? DEFAULT_LOG_TYPES : logTypes;
 
         // Legacy-format warning: if there are pre-v1.2 flat files at
-        // the folder's top level, the agent won't see them — the new
+        // the folder's top level, the agent won't see them - the new
         // discovery walks subdirs only.
         Pattern legacyTop = Pattern.compile(
-            "^(.+)\\.(device|scope|system)(?:\\.\\d+)?\\.log(?:\\.gz)?$");
+            "^(.+)\\.(device|scope|system|sass)(?:\\.\\d+)?\\.log(?:\\.gz)?$");
         File[] topFiles = folder.listFiles();
         if (topFiles != null) {
             for (File f : topFiles) {
                 if (f.isFile() && legacyTop.matcher(f.getName()).matches()) {
                     // Warn only the first time we see legacy files in this
-                    // folder — the rescan loop calls this every 2s.
+                    // folder - the rescan loop calls this every 2s.
                     if (warnedLegacyFolders.add(folder.getAbsolutePath())) {
                         System.err.println(
                             "[agent] warning: found pre-v1.2 flat log file '" +
@@ -414,7 +431,7 @@ public class Main {
     private static AgentConfig loadExternalConfig(String path) {
         var file = new File(path);
         if (!file.exists()) {
-            System.err.println("❌ Config file not found: '" + path + "'");
+            System.err.println("ERROR: Config file not found: '" + path + "'");
             System.exit(1);
         }
         try {
@@ -429,7 +446,7 @@ public class Main {
     private static AgentConfig loadClasspathConfig(String resourcePath) {
         try (var stream = Main.class.getClassLoader().getResourceAsStream(resourcePath)) {
             if (stream == null) {
-                System.err.println("❌ Bundled config not found: '" + resourcePath + "'");
+                System.err.println("ERROR: Bundled config not found: '" + resourcePath + "'");
                 System.exit(1);
             }
             return JsonSettings.MAPPER.readValue(stream, AgentConfig.class);
@@ -455,7 +472,7 @@ public class Main {
             Source (at least one of --folder or --folders is required):
               --folder=<path>              Log folder path          [GPUFL_SOURCE_FOLDER]
               --folders=<p1,p2,...>        Auto-discover folders    [GPUFL_SOURCE_FOLDERS]
-              --log-types=<a,b,...>        Log channels to tail     [GPUFL_LOG_TYPES]      default: device,scope,system
+              --log-types=<a,b,...>        Log channels to tail     [GPUFL_LOG_TYPES]      default: device,scope,system,sass
               --cursor-file=<path>         Cursor state file        [GPUFL_CURSOR_FILE]    default: ./cursor.json
 
             Publisher (required):
@@ -466,6 +483,9 @@ public class Main {
               --api-version=<v1|v2|...>    Backend API version       [GPUFL_HTTP_API_VERSION]   default: v1
               --token=<token>              Bearer auth token         [GPUFL_HTTP_TOKEN]
               --timeout=<seconds>          Request timeout           [GPUFL_HTTP_TIMEOUT_SEC]   default: 10
+              --upload-mode=<stream|legacy> Upload protocol           [GPUFL_AGENT_UPLOAD_MODE] default: stream
+              --stream-max-lines=<n>       Stream batch line limit    [GPUFL_AGENT_STREAM_MAX_LINES] default: 5000
+              --stream-max-bytes=<n>       Stream batch byte limit    [GPUFL_AGENT_STREAM_MAX_BYTES] default: 1000000
 
             Kafka publisher:
               --brokers=<host:port,...>    Bootstrap servers        [GPUFL_KAFKA_BROKERS]
@@ -473,7 +493,7 @@ public class Main {
               --compression=<type>         Compression codec        [GPUFL_KAFKA_COMPRESSION]  default: snappy
               --kafka-linger-ms=<ms>       Producer linger.ms       [GPUFL_KAFKA_LINGER_MS]    default: 100
 
-            Archiver (optional — disabled if --archiver-endpoint is absent):
+            Archiver (optional - disabled if --archiver-endpoint is absent):
               --archiver-endpoint=<url>    S3-compatible endpoint   [GPUFL_ARCHIVER_ENDPOINT]
               --archiver-bucket=<name>     S3 bucket                [GPUFL_ARCHIVER_BUCKET]
               --archiver-region=<region>   Region                   [GPUFL_ARCHIVER_REGION]  default: nyc3
@@ -492,7 +512,7 @@ public class Main {
               # JSON config file
               gpufl-agent --config=/etc/gpuflight/agent.json
 
-              # No args → uses bundled local.json (development only)
+              # No args -> uses bundled local.json (development only)
               gpufl-agent
             """);
     }

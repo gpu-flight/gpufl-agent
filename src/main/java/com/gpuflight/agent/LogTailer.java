@@ -2,6 +2,7 @@ package com.gpuflight.agent;
 
 import tools.jackson.databind.JsonNode;
 import com.gpuflight.agent.config.JsonSettings;
+import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.filter.DeviceMetricDeduplicator;
 import com.gpuflight.agent.model.LogWrapper;
 import com.gpuflight.agent.publisher.Publisher;
@@ -18,6 +19,8 @@ import java.net.InetAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.zip.CRC32;
 import java.util.zip.GZIPInputStream;
@@ -28,11 +31,11 @@ import java.util.zip.GZIPInputStream;
  * v1.2 file naming (one LogTailer per session/channel pair):
  *   Active file  : <folder>/<sessionId>/<channel>.log
  *   Rotated files: <folder>/<sessionId>/<channel>.1.log[.gz]   (newest rotated)
- *                  <folder>/<sessionId>/<channel>.2.log[.gz]   (older), …
+ *                  <folder>/<sessionId>/<channel>.2.log[.gz]   (older), ...
  *
  * Cursor fileIndex semantics:
- *   0   → currently tailing the active file
- *   N≥1 → finishing the just-rotated file .<N>.log[.gz] after a rotation event,
+ *   0   -> currently tailing the active file
+ *   N>=1 -> finishing the just-rotated file .<N>.log[.gz] after a rotation event,
  *          then returning to index 0 for the new active file
  *
  * Two robustness features guard against the client compressing a rotated file
@@ -56,6 +59,7 @@ public class LogTailer {
     private final CursorManager cursorMgr;
     private final BlockingQueue<Path> consumedFilesQueue; // nullable
     private final DeviceMetricDeduplicator deduplicator;    // nullable
+    private final StreamUploadSettings streamUploadSettings;
     private final String streamKey;
 
     /** Max rotated index scanned during restart reconciliation. Matches the
@@ -72,6 +76,14 @@ public class LogTailer {
     public LogTailer(File folder, String sessionId, String logType, String topicPrefix,
                      CursorManager cursorMgr, BlockingQueue<Path> consumedFilesQueue,
                      DeviceMetricDeduplicator deduplicator) {
+        this(folder, sessionId, logType, topicPrefix, cursorMgr, consumedFilesQueue,
+             deduplicator, StreamUploadSettings.DISABLED);
+    }
+
+    public LogTailer(File folder, String sessionId, String logType, String topicPrefix,
+                     CursorManager cursorMgr, BlockingQueue<Path> consumedFilesQueue,
+                     DeviceMetricDeduplicator deduplicator,
+                     StreamUploadSettings streamUploadSettings) {
         this.folder = folder;
         this.sessionId = sessionId;
         this.logType = logType;
@@ -79,9 +91,12 @@ public class LogTailer {
         this.cursorMgr = cursorMgr;
         this.consumedFilesQueue = consumedFilesQueue;
         this.deduplicator = deduplicator;
+        this.streamUploadSettings = streamUploadSettings == null
+            ? StreamUploadSettings.DISABLED
+            : streamUploadSettings;
         // Cursor key namespaces by session_id so two concurrent sessions'
         // device channels (say `s1.device` and `s2.device`) don't share
-        // a cursor position. Survives restart — sessions in
+        // a cursor position. Survives restart - sessions in
         // cursor.json that are no longer on disk get pruned lazily.
         this.streamKey = sessionId + "." + logType;
     }
@@ -98,9 +113,9 @@ public class LogTailer {
 
     /**
      * The compressed-active file: {@code <folder>/<sessionId>/<channel>.log.gz}.
-     * On a CLEAN SHUTDOWN the client compresses the active file IN PLACE — the
+     * On a CLEAN SHUTDOWN the client compresses the active file IN PLACE - the
      * name keeps the channel base with NO rotation index (active {@code
-     * <channel>.log} → {@code <channel>.log.gz}), distinct from a rotated
+     * <channel>.log} -> {@code <channel>.log.gz}), distinct from a rotated
      * {@code <channel>.<N>.log.gz}. A finished session's only data for a channel
      * therefore lives here, and there is never a plain {@code <channel>.log}
      * alongside it. The tail loop falls back to this when the active file is
@@ -111,7 +126,7 @@ public class LogTailer {
     }
 
     /**
-     * The rotated file for {@code index} (≥1). Prefers the uncompressed
+     * The rotated file for {@code index} (>=1). Prefers the uncompressed
      * {@code .index.log}; falls back to {@code .index.log.gz} once the client
      * has compressed it. Returns null if neither exists.
      */
@@ -122,8 +137,80 @@ public class LogTailer {
         return gz.exists() ? gz : null;
     }
 
+    private int highestRotatedIndex() {
+        for (int i = MAX_ROTATED_SCAN; i >= 1; i--) {
+            if (resolveRotated(i) != null) return i;
+        }
+        return -1;
+    }
+
+    private int previousRotatedIndex(int current) {
+        for (int i = current - 1; i >= 1; i--) {
+            if (resolveRotated(i) != null) return i;
+        }
+        return -1;
+    }
+
     private static boolean isGz(File f) {
         return f.getName().endsWith(".gz");
+    }
+
+    private static final class StreamBatch {
+        private final int maxLines;
+        private final long maxBytes;
+        private final List<String> lines = new ArrayList<>();
+        private long bytes;
+        private long startOffset = -1L;
+        private long endOffset;
+
+        StreamBatch(StreamUploadSettings settings) {
+            this.maxLines = Math.max(1, settings.maxLines());
+            this.maxBytes = Math.max(1L, settings.maxBytes());
+        }
+
+        boolean isEmpty() {
+            return lines.isEmpty();
+        }
+
+        long startOffset() {
+            return startOffset;
+        }
+
+        long endOffset() {
+            return endOffset;
+        }
+
+        int lineCount() {
+            return lines.size();
+        }
+
+        long bytes() {
+            return bytes;
+        }
+
+        void add(String line, long lineStart, long lineEnd) {
+            if (lines.isEmpty()) {
+                startOffset = lineStart;
+            }
+            lines.add(line);
+            bytes += line.getBytes(StandardCharsets.UTF_8).length + 1L;
+            endOffset = lineEnd;
+        }
+
+        boolean shouldFlush() {
+            return lines.size() >= maxLines || bytes >= maxBytes;
+        }
+
+        List<String> lines() {
+            return List.copyOf(lines);
+        }
+
+        void clear() {
+            lines.clear();
+            bytes = 0L;
+            startOffset = -1L;
+            endOffset = 0L;
+        }
     }
 
     // ---- File identity (D) ----
@@ -147,7 +234,7 @@ public class LogTailer {
      * CRC32 of the first {@link #HEAD_SIG_BYTES} bytes of the file's
      * UNCOMPRESSED content (transparently decompresses a .gz). Because it is
      * computed over content, it survives both the client's rename AND its
-     * compression — it is the signal that lets a restart find the file it was
+     * compression - it is the signal that lets a restart find the file it was
      * reading even after it became a .gz. Returns 0 when unreadable (the
      * "unset" sentinel); never returns 0 for real content.
      */
@@ -175,7 +262,7 @@ public class LogTailer {
         return false;
     }
 
-    /** Locate the index (0=active, ≥1=rotated) whose current file matches the
+    /** Locate the index (0=active, >=1=rotated) whose current file matches the
      *  saved identity. Returns -1 if no file matches. */
     private int locateByIdentity(CursorPosition saved) {
         File active = activeFile();
@@ -195,7 +282,7 @@ public class LogTailer {
     }
 
     /**
-     * Blocking tail loop — designed to run on a virtual thread.
+     * Blocking tail loop - designed to run on a virtual thread.
      * Thread.sleep() parks the virtual thread cheaply; no carrier thread is blocked.
      */
     public void tail(Publisher publisher) {
@@ -205,7 +292,7 @@ public class LogTailer {
 
         // ---- D: restart reconciliation ----
         // A brief downtime may have rotated (and compressed) the file we were
-        // reading out of its slot — active → .1.log → .1.log.gz, or a rotated
+        // reading out of its slot - active -> .1.log -> .1.log.gz, or a rotated
         // file shifted to a higher index. If we recorded an identity, find the
         // file that currently holds it (by content signature, which survives
         // compression) and resume from there instead of resetting to the new
@@ -218,10 +305,10 @@ public class LogTailer {
                 idx = located;
                 cursorMgr.update(streamKey, idx, offset);
             }
-            // located == -1 → file not found anywhere; keep cursor, legacy fallback applies.
+            // located == -1 -> file not found anywhere; keep cursor, legacy fallback applies.
         }
 
-        System.out.println("[" + logType + "] Starting – fileIndex=" + idx + ", offset=" + offset);
+        System.out.println("[" + logType + "] Starting - fileIndex=" + idx + ", offset=" + offset);
         System.out.println("[" + logType + "] Active file: " + activeFile().getAbsolutePath());
         System.out.println("[" + logType + "] Active file exists: " + activeFile().exists() + ", size: " + (activeFile().exists() ? activeFile().length() : -1));
 
@@ -250,21 +337,31 @@ public class LogTailer {
                 // only data for this channel lives there. Drain it once from
                 // our current offset: drainGz skips already-read uncompressed
                 // bytes, so this is correct whether we discovered the session
-                // cold (offset 0 → whole file) or were live-tailing
+                // cold (offset 0 -> whole file) or were live-tailing
                 // <channel>.log when it was compressed at shutdown (offset =
-                // bytes already published → just the tail).
+                // bytes already published -> just the tail).
                 File activeGz = activeGzFile();
                 if (activeGz.exists()) {
                     long resume = drainGz(activeGz, offset, publisher, 0);
                     if (resume < 0) {
                         System.out.println("[" + logType + "] Drained compressed-active "
-                                + activeGz.getName() + " – session finished.");
+                                + activeGz.getName() + " - session finished.");
                         if (consumedFilesQueue != null) consumedFilesQueue.offer(activeGz.toPath());
                         return; // compressed-active is terminal: no more data will arrive
                     }
-                    // Publish failed mid-drain — back off, retry from persisted offset.
+                    // Publish failed mid-drain - back off, retry from persisted offset.
                     offset = resume;
                     sleep(5000);
+                    continue;
+                }
+                int oldestRotated = highestRotatedIndex();
+                if (oldestRotated > 0) {
+                    File rotated = resolveRotated(oldestRotated);
+                    System.out.println("[" + logType + "] Active file is absent; draining rotated "
+                            + rotated.getName() + " from offset 0.");
+                    idx = oldestRotated;
+                    offset = 0;
+                    cursorMgr.update(streamKey, idx, offset);
                     continue;
                 }
                 sleep(1000);
@@ -275,14 +372,31 @@ public class LogTailer {
             if (idx > 0 && isGz(file)) {
                 long resume = drainGz(file, offset, publisher, idx);
                 if (resume < 0) {
-                    System.out.println("[" + logType + "] Finished " + file.getName() + " (gz), resuming active file.");
+                    System.out.println("[" + logType + "] Finished " + file.getName() + " (gz).");
                     if (consumedFilesQueue != null) consumedFilesQueue.offer(file.toPath());
                     lastConsumedSig = headSignature(file);
+                    int nextRotated = activeFile().exists() ? -1 : previousRotatedIndex(idx);
+                    if (nextRotated > 0) {
+                        idx = nextRotated;
+                        offset = 0;
+                        System.out.println("[" + logType + "] Draining next rotated file "
+                                + resolveRotated(idx).getName() + ".");
+                        cursorMgr.update(streamKey, idx, offset);
+                        continue;
+                    }
+                    if (!activeFile().exists()) {
+                        idx = 0;
+                        offset = 0;
+                        cursorMgr.update(streamKey, idx, offset);
+                        System.out.println("[" + logType + "] No active file remains; session finished.");
+                        return;
+                    }
+                    System.out.println("[" + logType + "] Resuming active file.");
                     idx = 0;
                     offset = 0;
                     cursorMgr.update(streamKey, idx, offset);
                 } else {
-                    // Publish failed mid-gz — back off and retry from persisted offset.
+                    // Publish failed mid-gz - back off and retry from persisted offset.
                     offset = resume;
                     sleep(5000);
                 }
@@ -301,17 +415,56 @@ public class LogTailer {
                     if (file.length() > offset) {
                         String line;
                         boolean publishFailed = false;
-                        // NOTE: RandomAccessFile.readLine() decodes bytes as ISO-8859-1,
-                        // corrupting multi-byte UTF-8 characters. Use readLineUtf8().
-                        while ((line = readLineUtf8(reader)) != null) {
-                            long lineStart = offset;
-                            if (!handleLine(line, publisher)) {
-                                System.out.println("[" + logType + "] Publish FAILED – will retry in 5s");
-                                reader.seek(lineStart); // retry this line next iteration
-                                publishFailed = true;
-                                break;
+                        if (streamUploadSettings.enabled()) {
+                            StreamBatch batch = new StreamBatch(streamUploadSettings);
+                            while (true) {
+                                long lineStart = reader.getFilePointer();
+                                line = readLineUtf8(reader);
+                                if (line == null) break;
+                                long lineEnd = reader.getFilePointer();
+
+                                String prepared = prepareStreamLine(line);
+                                if (prepared == null) {
+                                    offset = lineEnd;
+                                    continue;
+                                }
+                                batch.add(prepared, lineStart, lineEnd);
+                                if (batch.shouldFlush()) {
+                                    if (!flushStreamBatch(batch, publisher)) {
+                                        System.out.println("[" + logType + "] Stream publish FAILED - will retry in 5s");
+                                        reader.seek(batch.startOffset());
+                                        offset = batch.startOffset();
+                                        publishFailed = true;
+                                        break;
+                                    }
+                                    offset = batch.endOffset();
+                                    batch.clear();
+                                }
                             }
-                            offset = reader.getFilePointer();
+                            if (!publishFailed && !batch.isEmpty()) {
+                                if (!flushStreamBatch(batch, publisher)) {
+                                    System.out.println("[" + logType + "] Stream publish FAILED - will retry in 5s");
+                                    reader.seek(batch.startOffset());
+                                    offset = batch.startOffset();
+                                    publishFailed = true;
+                                } else {
+                                    offset = batch.endOffset();
+                                    batch.clear();
+                                }
+                            }
+                        } else {
+                            // NOTE: RandomAccessFile.readLine() decodes bytes as ISO-8859-1,
+                            // corrupting multi-byte UTF-8 characters. Use readLineUtf8().
+                            while ((line = readLineUtf8(reader)) != null) {
+                                long lineStart = offset;
+                                if (!handleLine(line, publisher)) {
+                                    System.out.println("[" + logType + "] Publish FAILED - will retry in 5s");
+                                    reader.seek(lineStart); // retry this line next iteration
+                                    publishFailed = true;
+                                    break;
+                                }
+                                offset = reader.getFilePointer();
+                            }
                         }
                         cursorMgr.update(streamKey, idx, offset, id.fileKey(), id.size(), id.headSig());
                         if (publishFailed) {
@@ -332,12 +485,12 @@ public class LogTailer {
                             if (rotated != null && rsig != 0L && rsig == lastConsumedSig) {
                                 sleep(200); // already consumed this exact rotated content; wait for a real new rotation
                             }
-                            // A compressed rotated file (.gz) is always valid to switch to —
+                            // A compressed rotated file (.gz) is always valid to switch to -
                             // its uncompressed size isn't comparable to our byte offset, so we
                             // rely on skip-to-offset in drainGz. For an uncompressed .log we keep
                             // the length>=offset guard (it must be at least the old active size).
                             else if (rotated != null && (isGz(rotated) || rotated.length() >= offset)) {
-                                System.out.println("[" + logType + "] Rotation detected – switching to " + rotated.getName() + " at offset " + offset);
+                                System.out.println("[" + logType + "] Rotation detected - switching to " + rotated.getName() + " at offset " + offset);
                                 idx = 1;
                                 cursorMgr.update(streamKey, idx, offset, id.fileKey(), id.size(), id.headSig());
                             } else {
@@ -345,11 +498,29 @@ public class LogTailer {
                             }
                         } else {
                             // Finished draining an uncompressed rotated file.
-                            System.out.println("[" + logType + "] Finished " + file.getName() + ", resuming active file.");
+                            System.out.println("[" + logType + "] Finished " + file.getName() + ".");
                             if (consumedFilesQueue != null) {
                                 consumedFilesQueue.offer(file.toPath());
                             }
                             lastConsumedSig = id.headSig();
+                            int nextRotated = activeFile().exists() ? -1 : previousRotatedIndex(idx);
+                            if (nextRotated > 0) {
+                                idx = nextRotated;
+                                offset = 0;
+                                System.out.println("[" + logType + "] Draining next rotated file "
+                                        + resolveRotated(idx).getName() + ".");
+                                cursorMgr.update(streamKey, idx, offset);
+                                fileIsDone = true;
+                                continue;
+                            }
+                            if (!activeFile().exists()) {
+                                idx = 0;
+                                offset = 0;
+                                cursorMgr.update(streamKey, idx, offset);
+                                System.out.println("[" + logType + "] No active file remains; session finished.");
+                                return;
+                            }
+                            System.out.println("[" + logType + "] Resuming active file.");
                             idx = 0;
                             offset = 0;
                             cursorMgr.update(streamKey, idx, offset);
@@ -370,19 +541,58 @@ public class LogTailer {
      * (EOF); otherwise the offset to resume from after a publish failure. The
      * cursor is updated as progress is made, so a crash mid-drain resumes
      * correctly. gz streams have no random seek, so a retry re-opens and
-     * re-skips — bounded by the 50 MB rotated-file size.
+     * re-skips - bounded by the 50 MB rotated-file size.
      */
     private long drainGz(File gz, long startOffset, Publisher publisher, int idx) {
         Identity id = identityOf(gz);
         try (InputStream in = new BufferedInputStream(new GZIPInputStream(new FileInputStream(gz)))) {
             long start = skipFully(in, startOffset);
             long[] consumed = { start };
+            if (streamUploadSettings.enabled()) {
+                StreamBatch batch = new StreamBatch(streamUploadSettings);
+                while (!Thread.currentThread().isInterrupted()) {
+                    long lineStart = consumed[0];
+                    String line = readLineCounting(in, consumed);
+                    if (line == null) {
+                        if (!batch.isEmpty()) {
+                            if (!flushStreamBatch(batch, publisher)) {
+                                System.out.println("[" + logType + "] Stream publish FAILED (gz) - will retry in 5s");
+                                cursorMgr.update(streamKey, idx, batch.startOffset(),
+                                                 id.fileKey(), id.size(), id.headSig());
+                                return batch.startOffset();
+                            }
+                            cursorMgr.update(streamKey, idx, batch.endOffset(),
+                                             id.fileKey(), id.size(), id.headSig());
+                        }
+                        return -1; // EOF -> fully drained
+                    }
+
+                    String prepared = prepareStreamLine(line);
+                    if (prepared == null) {
+                        cursorMgr.update(streamKey, idx, consumed[0], id.fileKey(), id.size(), id.headSig());
+                        continue;
+                    }
+                    batch.add(prepared, lineStart, consumed[0]);
+                    if (batch.shouldFlush()) {
+                        if (!flushStreamBatch(batch, publisher)) {
+                            System.out.println("[" + logType + "] Stream publish FAILED (gz) - will retry in 5s");
+                            cursorMgr.update(streamKey, idx, batch.startOffset(),
+                                             id.fileKey(), id.size(), id.headSig());
+                            return batch.startOffset();
+                        }
+                        cursorMgr.update(streamKey, idx, batch.endOffset(),
+                                         id.fileKey(), id.size(), id.headSig());
+                        batch.clear();
+                    }
+                }
+                return batch.isEmpty() ? consumed[0] : batch.startOffset();
+            }
             while (!Thread.currentThread().isInterrupted()) {
                 long lineStart = consumed[0];
                 String line = readLineCounting(in, consumed);
-                if (line == null) return -1; // EOF → fully drained
+                if (line == null) return -1; // EOF -> fully drained
                 if (!handleLine(line, publisher)) {
-                    System.out.println("[" + logType + "] Publish FAILED (gz) – will retry in 5s");
+                    System.out.println("[" + logType + "] Publish FAILED (gz) - will retry in 5s");
                     cursorMgr.update(streamKey, idx, lineStart, id.fileKey(), id.size(), id.headSig());
                     return lineStart;
                 }
@@ -395,6 +605,47 @@ public class LogTailer {
         }
     }
 
+    private boolean flushStreamBatch(StreamBatch batch, Publisher publisher) {
+        if (batch.isEmpty()) {
+            return true;
+        }
+        System.out.println("[" + logType + "] Sending stream batch: session=" + sessionId
+            + " lines=" + batch.lineCount()
+            + " bytes=" + batch.bytes()
+            + " offset=" + batch.startOffset() + "->" + batch.endOffset());
+        boolean accepted = publisher.publishStream(sessionId, batch.lines());
+        if (accepted) {
+            System.out.println("[" + logType + "] Stream batch accepted: session=" + sessionId
+                + " lines=" + batch.lineCount()
+                + " nextOffset=" + batch.endOffset());
+        } else {
+            System.out.println("[" + logType + "] Stream batch rejected: session=" + sessionId
+                + " retryOffset=" + batch.startOffset());
+        }
+        return accepted;
+    }
+
+    /**
+     * Validate and optionally deduplicate one raw NDJSON line for stream upload.
+     * Returns null when the line should be skipped.
+     */
+    private String prepareStreamLine(String line) {
+        if (line.isBlank()) return null;
+        try {
+            JsonNode node = JsonSettings.MAPPER.readTree(line);
+            String type = node.path("type").asText("unknown");
+            if (deduplicator != null && "device_metric_batch".equals(type)) {
+                return deduplicator.filterBatch(line);
+            }
+            return line;
+        } catch (Exception e) {
+            // Occasional parse failures are expected when tailing an actively-written
+            // file - the reader may see a partial line before the writer flushes.
+            System.err.println("[LogTailer] Skipping malformed line: " + e.getMessage());
+            return null;
+        }
+    }
+
     /**
      * Parse, dedup, and publish one raw line. Returns true if the line was
      * published or intentionally skipped (blank / malformed / all rows
@@ -403,7 +654,7 @@ public class LogTailer {
     private boolean handleLine(String line, Publisher publisher) {
         if (line.isBlank()) return true;
         LogWrapper wrapper = processLine(line);
-        if (wrapper == null) return true; // malformed — skip (matches prior behavior)
+        if (wrapper == null) return true; // malformed - skip (matches prior behavior)
         if (deduplicator != null && "device_metric_batch".equals(wrapper.type())) {
             String filtered = deduplicator.filterBatch(wrapper.data());
             if (filtered == null) return true; // all rows suppressed
@@ -429,7 +680,7 @@ public class LogTailer {
             );
         } catch (Exception e) {
             // Occasional parse failures are expected when tailing an actively-written
-            // file — the reader may see a partial line before the writer flushes.
+            // file - the reader may see a partial line before the writer flushes.
             System.err.println("[LogTailer] Skipping malformed line: " + e.getMessage());
             return null;
         }
