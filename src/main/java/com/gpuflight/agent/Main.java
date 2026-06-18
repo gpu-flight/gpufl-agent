@@ -102,6 +102,15 @@ public class Main {
             if (!startedSessions.add(key)) return;
             System.out.println("[agent] Tailing session \"" + session.sessionId()
                                + "\" in " + session.folder() + " types=" + session.logTypes());
+            // Count this session's per-channel tailers. When the LAST one finishes
+            // NATURALLY (session drained + every batch accepted), tell the backend the
+            // upload is complete so it can finalize without waiting out its grace
+            // window. A tailer that exits via interruption (agent shutdown) or never
+            // finishes (a channel whose file never appears) does NOT count toward the
+            // signal — so a partial upload is never declared complete; the backend's
+            // grace path covers those.
+            var remaining = new java.util.concurrent.atomic.AtomicInteger(session.logTypes().size());
+            String sid = session.sessionId();
             for (String type : session.logTypes()) {
                 executor.submit(() -> {
                     // Only the "system" channel carries device_metric_batch events.
@@ -110,6 +119,13 @@ public class Main {
                                                topicPrefix, cursorMgr, consumedFilesQueue, dedup,
                                                streamUploadSettings);
                     tailer.tail(publisher);
+                    // Reached only when tail() returns. Skip on interruption (agent
+                    // shutdown) so an in-flight upload is never declared complete.
+                    if (!Thread.currentThread().isInterrupted()
+                            && remaining.decrementAndGet() == 0
+                            && streamUploadSettings.enabled()) {
+                        signalSessionComplete(publisher, sid);
+                    }
                 });
             }
         };
@@ -174,6 +190,33 @@ public class Main {
 
         // Block main thread until SIGTERM/Ctrl+C triggers the shutdown hook.
         new CountDownLatch(1).await();
+    }
+
+    /**
+     * Tell the backend that every channel of a session has finished uploading.
+     * Best-effort with a few bounded retries: {@code publishSessionComplete}
+     * returns true for terminal outcomes (2xx, or a 4xx like 404 from an older
+     * backend) and false only for transient 5xx/network errors. If it never gets
+     * through, the backend's grace path still finalizes the session, so this is
+     * a pure latency optimization — never a correctness dependency.
+     */
+    private static void signalSessionComplete(Publisher publisher, String sessionId) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                if (publisher.publishSessionComplete(sessionId)) return;
+            } catch (Exception e) {
+                System.err.println("[agent] session-complete signal error for "
+                                   + sessionId + ": " + e.getMessage());
+            }
+            try {
+                Thread.sleep(2000L);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        System.out.println("[agent] session-complete signal gave up for " + sessionId
+                           + " - backend grace finalize will apply");
     }
 
     // -------------------------------------------------------------------------

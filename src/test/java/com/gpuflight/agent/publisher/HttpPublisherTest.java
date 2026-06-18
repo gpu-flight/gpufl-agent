@@ -144,6 +144,48 @@ class HttpPublisherTest {
     }
 
     @Test
+    void publishStream_alreadyUploaded409_advancesAsAccepted() {
+        // 409 "session already uploaded" is terminal - retrying never succeeds.
+        // publishStream must return true (advance) so the tailer drains to EOF and
+        // exits instead of re-POSTing the same batch every 5s forever.
+        statusToReturn.set(409);
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5, "stream", 100, 1_000_000L);
+        HttpPublisher pub = new HttpPublisher(config);
+
+        boolean ok = pub.publishStream("session-1",
+            List.of("{\"type\":\"kernel_event\",\"session_id\":\"session-1\"}"));
+
+        assertTrue(ok, "409 already-uploaded must advance the cursor, not retry forever");
+    }
+
+    @Test
+    void publishStream_limitExceeded402_advancesAsAccepted() {
+        // 402 (workspace/GPU limit) is permanent; retrying won't help.
+        statusToReturn.set(402);
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5, "stream", 100, 1_000_000L);
+        HttpPublisher pub = new HttpPublisher(config);
+
+        boolean ok = pub.publishStream("session-1",
+            List.of("{\"type\":\"kernel_event\",\"session_id\":\"session-1\"}"));
+
+        assertTrue(ok, "402 limit-exceeded must advance, not retry forever");
+    }
+
+    @Test
+    void publishStream_serverError500_signalsRetry() {
+        // A transient 5xx must remain retriable (return false) so the tailer backs
+        // off and retries from the same offset.
+        statusToReturn.set(500);
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5, "stream", 100, 1_000_000L);
+        HttpPublisher pub = new HttpPublisher(config);
+
+        boolean ok = pub.publishStream("session-1",
+            List.of("{\"type\":\"kernel_event\",\"session_id\":\"session-1\"}"));
+
+        assertFalse(ok, "5xx is transient and must be retried");
+    }
+
+    @Test
     void publish_nonSuccessResponse_doesNotThrow() throws InterruptedException {
         statusToReturn.set(500);
         HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5);
@@ -168,5 +210,38 @@ class HttpPublisherTest {
         HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5);
         HttpPublisher pub = new HttpPublisher(config);
         assertDoesNotThrow(pub::close);
+    }
+
+    // ── publishSessionComplete (agent "all channels uploaded" signal) ──
+
+    @Test
+    void publishSessionComplete_postsToEndpointWithSessionHeader_andReturnsTrueOn200() {
+        statusToReturn.set(200);
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5);
+        HttpPublisher pub = new HttpPublisher(config);
+
+        boolean ok = pub.publishSessionComplete("session-xyz");
+
+        assertTrue(ok);
+        assertEquals("/api/v1/events/session-complete", lastPath.get());
+        assertEquals("session-xyz", lastSessionId.get());
+    }
+
+    @Test
+    void publishSessionComplete_oldBackend404_returnsTrueSoAgentDoesNotRetry() {
+        // An older backend without the endpoint 404s; the agent must treat it as
+        // terminal (the grace path still finalizes the session) and not loop.
+        statusToReturn.set(404);
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5);
+        boolean ok = new HttpPublisher(config).publishSessionComplete("session-xyz");
+        assertTrue(ok);
+    }
+
+    @Test
+    void publishSessionComplete_serverError500_returnsFalseForRetry() {
+        statusToReturn.set(500);
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5);
+        boolean ok = new HttpPublisher(config).publishSessionComplete("session-xyz");
+        assertFalse(ok);
     }
 }

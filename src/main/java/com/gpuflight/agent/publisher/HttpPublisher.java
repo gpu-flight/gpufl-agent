@@ -106,6 +106,23 @@ public class HttpPublisher implements Publisher {
                     + response.statusCode() + " session=" + sessionId);
                 return true;
             }
+            if (response.statusCode() == 409) {
+                // Session already finalized on the backend - typically this agent
+                // re-tailing a finished session after a restart. The data is
+                // already stored and re-profiling is required to replace it, so
+                // retrying NEVER succeeds. Advance like a 2xx (mirrors the 402
+                // handling in publish()) so the tailer drains to EOF and exits
+                // instead of re-POSTing the same batch every 5s forever.
+                System.out.println("[agent] HTTP stream POST: session already uploaded (409) - "
+                    + "skipping, session=" + sessionId);
+                return true;
+            }
+            if (response.statusCode() == 402) {
+                // GPU/workspace limit exceeded - permanent; retrying won't help.
+                System.err.println("[GPUFL] GPU limit exceeded for this workspace - "
+                    + "skipping session=" + sessionId + ". " + response.body());
+                return true;
+            }
             System.out.println("HTTP stream publish failed [" + url + "]: "
                 + response.statusCode() + " - " + response.body());
             return false;
@@ -114,6 +131,45 @@ public class HttpPublisher implements Publisher {
             return false;
         } catch (Exception e) {
             System.out.println("HTTP stream connection error: " + e);
+            return false;
+        }
+    }
+
+    @Override
+    public boolean publishSessionComplete(String sessionId) {
+        try {
+            String url = config.endpointFor("session-complete");
+            System.out.println("[agent] HTTP session-complete POST starting: url=" + url
+                + " session=" + sessionId);
+
+            var requestBuilder = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("X-GpuFlight-Session-Id", sessionId)
+                .POST(HttpRequest.BodyPublishers.noBody());
+
+            addAuthHeader(requestBuilder);
+
+            var response = client.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
+            int sc = response.statusCode();
+            if (sc >= 200 && sc <= 299) {
+                System.out.println("[agent] HTTP session-complete accepted: status=" + sc
+                    + " session=" + sessionId);
+                return true;
+            }
+            if (sc >= 400 && sc < 500) {
+                // Old backend without the endpoint (404), or a client error: nothing
+                // to retry — the backend's grace path still finalizes the session.
+                System.out.println("[agent] HTTP session-complete not applicable (status=" + sc
+                    + ") session=" + sessionId + " - backend grace finalize will apply");
+                return true;
+            }
+            System.out.println("HTTP session-complete failed [" + url + "]: " + sc + " - " + response.body());
+            return false;   // 5xx: transient, worth a bounded retry
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (Exception e) {
+            System.out.println("HTTP session-complete connection error: " + e);
             return false;
         }
     }

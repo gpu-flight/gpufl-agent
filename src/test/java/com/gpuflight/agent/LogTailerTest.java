@@ -632,4 +632,53 @@ class LogTailerTest {
         assertEquals(1, publisher.events.size(), "Only the tail after the offset should be read");
         assertTrue(publisher.events.get(0).data().contains("k2"));
     }
+
+    // ---- A finished session is not re-uploaded when the agent restarts ----
+
+    @Test
+    void tail_finishedRotatedGzSession_notReuploadedOnRestart(@TempDir Path tempDir) throws Exception {
+        // A finished session whose channel rotated: only <channel>.1.log.gz
+        // remains (no active <channel>.log). Run 1 drains it fully and tail()
+        // returns. Run 2 over the SAME files + cursor must NOT re-publish: the
+        // cursor left at the gz's EOF makes the restart skip-to-EOF and exit.
+        //
+        // Regression: the terminal "session finished" branch used to reset the
+        // cursor to offset 0 while keeping the file identity, so run 2 re-located
+        // the gz by content signature and re-uploaded the whole session - which
+        // the backend then rejected with 409 "session already uploaded", looping
+        // forever.
+        Files.createDirectories(tempDir.resolve("app"));
+        String content =
+            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k1\"}\n" +
+            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k2\"}\n";
+        Path plain = tempDir.resolve("app/device.1.log");
+        Files.writeString(plain, content);
+        Path gz = tempDir.resolve("app/device.1.log.gz");
+        gzip(plain, gz);
+        Files.delete(plain); // finished: only the rotated .gz remains, no active .log
+
+        File cursorFile = tempDir.resolve("cursor.json").toFile();
+
+        // Run 1: drains the gz fully; tail() returns on "session finished".
+        CapturingStreamPublisher pub1 = new CapturingStreamPublisher();
+        LogTailer tailer1 = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
+                new CursorManager(cursorFile), new LinkedBlockingQueue<>(), null,
+                new StreamUploadSettings(true, 10, 1_000_000L));
+        Thread t1 = startTailer(tailer1, pub1);
+        awaitEvents(pub1.batches, 1, 3000);
+        t1.join(3000); // tail() exits by itself once the finished session is drained
+        assertFalse(t1.isAlive(), "tailer should exit on its own after draining a finished session");
+        assertEquals(1, pub1.batches.size(), "run 1 publishes the finished session once");
+
+        // Run 2: same files, same persisted cursor. Must NOT re-publish anything.
+        CapturingStreamPublisher pub2 = new CapturingStreamPublisher();
+        LogTailer tailer2 = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
+                new CursorManager(cursorFile), new LinkedBlockingQueue<>(), null,
+                new StreamUploadSettings(true, 10, 1_000_000L));
+        Thread t2 = startTailer(tailer2, pub2);
+        t2.join(3000); // should skip-to-EOF and exit immediately
+        assertFalse(t2.isAlive(), "restart of a finished session should exit immediately");
+        assertTrue(pub2.batches.isEmpty(),
+                "a finished session must NOT be re-uploaded on restart (got " + pub2.batches + ")");
+    }
 }
