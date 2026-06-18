@@ -385,9 +385,12 @@ public class LogTailer {
                         continue;
                     }
                     if (!activeFile().exists()) {
-                        idx = 0;
-                        offset = 0;
-                        cursorMgr.update(streamKey, idx, offset);
+                        // Session finished. Leave the cursor at this drained file's
+                        // EOF (drainGz already persisted {idx, endOffset, identity})
+                        // so a restart resumes HERE, skips to EOF and exits. Do NOT
+                        // reset to offset 0 - that keeps the file identity but wipes
+                        // progress, so the next run re-locates this file by content
+                        // signature and re-uploads the whole session (backend 409s it).
                         System.out.println("[" + logType + "] No active file remains; session finished.");
                         return;
                     }
@@ -514,9 +517,10 @@ public class LogTailer {
                                 continue;
                             }
                             if (!activeFile().exists()) {
-                                idx = 0;
-                                offset = 0;
-                                cursorMgr.update(streamKey, idx, offset);
+                                // Session finished. Leave the cursor at this drained
+                                // file's EOF (updated above to {idx, offset, identity})
+                                // so a restart skips to EOF and exits. Do NOT reset to
+                                // offset 0 - that re-uploads the whole session next run.
                                 System.out.println("[" + logType + "] No active file remains; session finished.");
                                 return;
                             }
