@@ -1,5 +1,6 @@
 package com.gpuflight.agent;
 
+import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.model.LogWrapper;
 import com.gpuflight.agent.publisher.Publisher;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,26 @@ class LogTailerTest {
         public void close() {}
     }
 
+    static class CapturingStreamPublisher implements Publisher {
+        final List<List<String>> batches = new CopyOnWriteArrayList<>();
+        final List<String> sessionIds = new CopyOnWriteArrayList<>();
+
+        @Override
+        public boolean publish(String topic, String key, LogWrapper log) {
+            return false;
+        }
+
+        @Override
+        public boolean publishStream(String sessionId, List<String> ndjsonLines) {
+            sessionIds.add(sessionId);
+            batches.add(List.copyOf(ndjsonLines));
+            return true;
+        }
+
+        @Override
+        public void close() {}
+    }
+
     /** gzip src → dest (used to simulate the C++ client compressing a rotated file). */
     private static void gzip(Path src, Path dest) throws IOException {
         try (var in = Files.newInputStream(src);
@@ -77,6 +98,28 @@ class LogTailerTest {
     }
 
     // ---- happy-path: reads existing lines ----
+
+    @Test
+    void tail_sassChannel_publishes(@TempDir Path tempDir) throws Exception {
+        // sass.log carries SASS-disassembly / source-content artifacts split
+        // out of device.log; the agent must tail it like any other channel
+        // or those artifacts silently miss live upload.
+        Files.createDirectories(tempDir.resolve("app"));
+        Files.writeString(tempDir.resolve("app/sass.log"),
+            "{\"type\":\"cubin_disassembly\"}\n");
+
+        CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
+        CapturingPublisher publisher = new CapturingPublisher();
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "sass", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
+
+        Thread t = startTailer(tailer, publisher);
+        awaitEvents(publisher.events, 1, 3000);
+        t.interrupt();
+        t.join(2000);
+
+        assertEquals(1, publisher.events.size());
+        assertEquals("cubin_disassembly", publisher.events.get(0).type());
+    }
 
     @Test
     void tail_readsExistingLinesAndPublishes(@TempDir Path tempDir) throws Exception {
@@ -190,6 +233,65 @@ class LogTailerTest {
         CursorPosition pos = mgr2.get("app.device");
         assertEquals(0, pos.fileIndex());
         assertTrue(pos.offset() > 0, "Cursor offset should have advanced past the line");
+    }
+
+    @Test
+    void tail_streamMode_publishesNdjsonBatchAndPersistsCursor(@TempDir Path tempDir) throws Exception {
+        Files.createDirectories(tempDir.resolve("app"));
+        Path logFile = tempDir.resolve("app/device.log");
+        Files.writeString(logFile,
+            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k1\"}\n" +
+            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k2\"}\n"
+        );
+
+        File cursorFile = tempDir.resolve("cursor.json").toFile();
+        CursorManager cursorMgr = new CursorManager(cursorFile);
+        CapturingStreamPublisher publisher = new CapturingStreamPublisher();
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device",
+                "gpu-trace", cursorMgr, new LinkedBlockingQueue<>(), null,
+                new StreamUploadSettings(true, 10, 1_000_000L));
+
+        Thread t = startTailer(tailer, publisher);
+        awaitEvents(publisher.batches, 1, 3000);
+        t.interrupt();
+        t.join(2000);
+
+        assertEquals(List.of("app"), publisher.sessionIds);
+        assertEquals(1, publisher.batches.size());
+        assertEquals(2, publisher.batches.get(0).size());
+        assertTrue(publisher.batches.get(0).get(0).contains("\"k1\""));
+
+        CursorPosition pos = new CursorManager(cursorFile).get("app.device");
+        assertEquals(0, pos.fileIndex());
+        assertTrue(pos.offset() > 0, "Cursor offset should advance after stream batch accept");
+    }
+
+    @Test
+    void tail_streamMode_drainsRotatedGzWhenActiveFileMissing(@TempDir Path tempDir) throws Exception {
+        Files.createDirectories(tempDir.resolve("app"));
+        String content =
+            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k1\"}\n" +
+            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k2\"}\n";
+        Path plain = tempDir.resolve("app/device.1.log");
+        Files.writeString(plain, content);
+        Path gz = tempDir.resolve("app/device.1.log.gz");
+        gzip(plain, gz);
+        Files.delete(plain);
+
+        File cursorFile = tempDir.resolve("cursor.json").toFile();
+        CapturingStreamPublisher publisher = new CapturingStreamPublisher();
+        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device",
+                "gpu-trace", new CursorManager(cursorFile), new LinkedBlockingQueue<>(), null,
+                new StreamUploadSettings(true, 10, 1_000_000L));
+
+        Thread t = startTailer(tailer, publisher);
+        awaitEvents(publisher.batches, 1, 3000);
+        t.interrupt();
+        t.join(2000);
+
+        assertEquals(1, publisher.batches.size());
+        assertEquals(2, publisher.batches.get(0).size());
+        assertTrue(publisher.batches.get(0).get(1).contains("\"k2\""));
     }
 
     // ---- waits when active file is absent ----

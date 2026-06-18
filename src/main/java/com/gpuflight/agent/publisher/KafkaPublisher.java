@@ -27,7 +27,7 @@ public class KafkaPublisher implements Publisher {
         try {
             String message = JsonSettings.MAPPER.writeValueAsString(log.data());
             // producer.send() is async and only blocks when the internal buffer is full.
-            // Blocking on a virtual thread is fine — carrier thread parks, not blocks.
+            // Blocking on a virtual thread is fine - carrier thread parks, not blocks.
             producer.send(new ProducerRecord<>(topic, key, message)).get();
             return true;
         } catch (Exception e) {

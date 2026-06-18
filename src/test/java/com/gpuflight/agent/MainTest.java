@@ -97,7 +97,7 @@ class MainTest {
 
     @Test
     void logTypesOrDefault_usesDefaultWhenAbsent() {
-        assertEquals(List.of("device", "scope", "system"),
+        assertEquals(List.of("device", "scope", "system", "sass"),
             Main.logTypesOrDefault(new String[]{}, Collections.emptyMap()));
     }
 

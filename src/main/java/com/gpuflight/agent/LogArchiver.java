@@ -32,7 +32,7 @@ public class LogArchiver {
             .build();
         // Blocking S3 upload is fine on a virtual thread.
         s3.putObject(request, file);
-        System.out.println("[archiver] Uploaded " + file.getFileName() + " → s3://" + config.bucket() + "/" + objectKey);
+        System.out.println("[archiver] Uploaded " + file.getFileName() + " -> s3://" + config.bucket() + "/" + objectKey);
         if (config.deleteAfterUpload()) {
             file.toFile().delete();
             System.out.println("[archiver] Deleted " + file.getFileName());

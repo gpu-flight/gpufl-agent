@@ -14,8 +14,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *
  * <p>Two identity signals, because the client both renames AND compresses on
  * rotation:
- *   - {@code fileKey} (inode on POSIX) survives a rename/shift (active →
- *     {@code .1.log} → {@code .2.log}) but NOT compression — gzip writes a new
+ *   - {@code fileKey} (inode on POSIX) survives a rename/shift (active ->
+ *     {@code .1.log} -> {@code .2.log}) but NOT compression - gzip writes a new
  *     file ({@code .1.log.gz}) with a different inode. Fast path on Linux while
  *     the rotated file is still uncompressed.
  *   - {@code headSig} (CRC32 of the first bytes of the *uncompressed* content)
@@ -24,7 +24,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *     {@code .gz}.
  *
  * <p>Identity fields are nullable/zero and default that way, so cursor files
- * written before this change still deserialize cleanly (identity unknown →
+ * written before this change still deserialize cleanly (identity unknown ->
  * legacy behavior).
  */
 public record CursorPosition(
@@ -34,7 +34,7 @@ public record CursorPosition(
     @JsonProperty("fileSize")  long   fileSize,   // size at last update (sanity check)
     @JsonProperty("headSig")   long   headSig     // CRC32 of first uncompressed bytes; survives compression. 0 = unset.
 ) {
-    /** Backward-compatible constructor — identity unknown. */
+    /** Backward-compatible constructor - identity unknown. */
     public CursorPosition(int fileIndex, long offset) {
         this(fileIndex, offset, null, 0L, 0L);
     }

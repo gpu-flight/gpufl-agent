@@ -20,6 +20,8 @@ public record LogSourceConfig(
 ) {
     public LogSourceConfig {
         if (folder == null) folder = ".";
-        if (logTypes == null || logTypes.isEmpty()) logTypes = List.of("device", "scope", "system");
+        // "sass" carries the SASS-disassembly / source-content artifacts split
+        // out of device.log; tail it by default or they miss live upload.
+        if (logTypes == null || logTypes.isEmpty()) logTypes = List.of("device", "scope", "system", "sass");
     }
 }
