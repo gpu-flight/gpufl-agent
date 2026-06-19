@@ -15,6 +15,17 @@ public interface Publisher extends Closeable {
     }
 
     /**
+     * Upload a complete, already-gzipped NDJSON window verbatim as one chunk - the
+     * client's {@code <channel>.<index>.log.gz} sent byte-for-byte. It is exactly the
+     * gzipped-NDJSON wire format {@link #publishStream} produces, so this skips the
+     * decompress + re-batch + re-gzip round-trip. Default unsupported - the window
+     * fast-path is gated to the HTTP stream publisher.
+     */
+    default boolean publishStreamGz(String sessionId, byte[] gzBody) {
+        return false;
+    }
+
+    /**
      * Signal the backend that EVERY channel of {@code sessionId} has finished
      * uploading — the agent has drained all per-channel tailers and every batch
      * was accepted. Lets the backend finalize the session immediately instead of

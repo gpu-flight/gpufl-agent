@@ -78,6 +78,14 @@ class HttpPublisherTest {
         }
     }
 
+    private static byte[] gzipBytes(String s) throws IOException {
+        var out = new java.io.ByteArrayOutputStream();
+        try (var gz = new java.util.zip.GZIPOutputStream(out)) {
+            gz.write(s.getBytes(StandardCharsets.UTF_8));
+        }
+        return out.toByteArray();
+    }
+
     @Test
     void publish_sendsPostRequest() throws InterruptedException {
         HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5);
@@ -183,6 +191,44 @@ class HttpPublisherTest {
             List.of("{\"type\":\"kernel_event\",\"session_id\":\"session-1\"}"));
 
         assertFalse(ok, "5xx is transient and must be retried");
+    }
+
+    @Test
+    void publishStreamGz_sendsVerbatimGzAsOneChunk() throws IOException {
+        // A complete .gz window is POSTed byte-for-byte - same endpoint/headers as
+        // publishStream, but no decompress/re-gzip on the agent side.
+        statusToReturn.set(202);
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5, "stream", 100, 1_000_000L);
+        HttpPublisher pub = new HttpPublisher(config);
+
+        byte[] gz = gzipBytes(
+            "{\"type\":\"kernel_event\",\"session_id\":\"s2\"}\n{\"type\":\"scope_event\",\"session_id\":\"s2\"}\n");
+        boolean ok = pub.publishStreamGz("s2", gz);
+
+        assertTrue(ok);
+        assertEquals("/api/v1/events/stream", lastPath.get());
+        assertEquals("gzip", lastContentEncoding.get());
+        assertEquals("application/x-ndjson", lastContentType.get());
+        assertEquals("s2", lastSessionId.get());
+        assertTrue(lastBody.get().contains("\"kernel_event\""));
+        assertTrue(lastBody.get().endsWith("\n"));
+    }
+
+    @Test
+    void publishStreamGz_emptyBody_returnsTrueWithoutPosting() {
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5, "stream", 100, 1_000_000L);
+        HttpPublisher pub = new HttpPublisher(config);
+        assertTrue(pub.publishStreamGz("s2", new byte[0]), "empty window is a no-op success");
+        assertNull(lastPath.get(), "no POST for an empty body");
+    }
+
+    @Test
+    void publishStreamGz_alreadyUploaded409_advancesAsAccepted() throws IOException {
+        statusToReturn.set(409);
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5, "stream", 100, 1_000_000L);
+        HttpPublisher pub = new HttpPublisher(config);
+        assertTrue(pub.publishStreamGz("s2", gzipBytes("{\"type\":\"kernel_event\"}\n")),
+            "409 already-uploaded must advance, not retry forever");
     }
 
     @Test

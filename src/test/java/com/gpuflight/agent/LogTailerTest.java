@@ -7,12 +7,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
-
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -21,66 +19,61 @@ import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Window-model tailing: the client publishes each rotation as a COMPLETE,
+ * immutable file {@code <channel>.<index>.log[.gz]} (index 1 = oldest, higher =
+ * newer). The tailer sends each finished window WHOLE, in increasing index order,
+ * and finishes once the session's {@code .tmp/} dir is gone and no further window
+ * has appeared. There is no live {@code <channel>.log} to tail.
+ */
 class LogTailerTest {
 
-    /** Simple in-memory publisher for testing. */
     static class CapturingPublisher implements Publisher {
         final List<LogWrapper> events = new CopyOnWriteArrayList<>();
-
-        @Override
-        public boolean publish(String topic, String key, LogWrapper log) {
-            events.add(log);
-            return true;
-        }
-
-        @Override
-        public void close() {}
-    }
-
-    /** Publisher that rejects any line whose data contains a marker (simulates
-     *  a backend that won't accept a specific event), accepting everything else. */
-    static class RejectingPublisher implements Publisher {
-        final List<LogWrapper> events = new CopyOnWriteArrayList<>();
-        final String reject;
-        RejectingPublisher(String reject) { this.reject = reject; }
-
-        @Override
-        public boolean publish(String topic, String key, LogWrapper log) {
-            if (reject != null && log.data().contains(reject)) return false;
-            events.add(log);
-            return true;
-        }
-
-        @Override
-        public void close() {}
+        @Override public boolean publish(String topic, String key, LogWrapper log) { events.add(log); return true; }
+        @Override public void close() {}
     }
 
     static class CapturingStreamPublisher implements Publisher {
         final List<List<String>> batches = new CopyOnWriteArrayList<>();
         final List<String> sessionIds = new CopyOnWriteArrayList<>();
-
-        @Override
-        public boolean publish(String topic, String key, LogWrapper log) {
-            return false;
+        @Override public boolean publish(String topic, String key, LogWrapper log) { return false; }
+        @Override public boolean publishStream(String sessionId, List<String> ndjsonLines) {
+            sessionIds.add(sessionId); batches.add(List.copyOf(ndjsonLines)); return true;
         }
-
-        @Override
-        public boolean publishStream(String sessionId, List<String> ndjsonLines) {
+        @Override public boolean publishStreamGz(String sessionId, byte[] gzBody) {
+            // Mirror the backend: decompress the verbatim window gz and record its lines.
             sessionIds.add(sessionId);
-            batches.add(List.copyOf(ndjsonLines));
+            try (var in = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(gzBody))) {
+                String text = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                batches.add(java.util.Arrays.stream(text.split("\n")).filter(s -> !s.isEmpty()).toList());
+            } catch (Exception e) { return false; }
             return true;
         }
-
-        @Override
-        public void close() {}
+        @Override public void close() {}
     }
 
-    /** gzip src → dest (used to simulate the C++ client compressing a rotated file). */
     private static void gzip(Path src, Path dest) throws IOException {
-        try (var in = Files.newInputStream(src);
-             var out = new GZIPOutputStream(Files.newOutputStream(dest))) {
+        try (var in = Files.newInputStream(src); var out = new GZIPOutputStream(Files.newOutputStream(dest))) {
             in.transferTo(out);
         }
+    }
+
+    /** Publish a complete window {@code <session>/<channel>.<index>.log}. */
+    private static Path window(Path dir, String session, String channel, int index, String content) throws IOException {
+        Files.createDirectories(dir.resolve(session));
+        Path p = dir.resolve(session + "/" + channel + "." + index + ".log");
+        Files.writeString(p, content);
+        return p;
+    }
+
+    /** Publish a compressed window {@code <session>/<channel>.<index>.log.gz}. */
+    private static Path gzWindow(Path dir, String session, String channel, int index, String content) throws IOException {
+        Path plain = window(dir, session, channel, index, content);
+        Path gz = dir.resolve(session + "/" + channel + "." + index + ".log.gz");
+        gzip(plain, gz);
+        Files.delete(plain);
+        return gz;
     }
 
     private static Thread startTailer(LogTailer tailer, Publisher publisher) {
@@ -92,593 +85,220 @@ class LogTailerTest {
 
     private static void awaitEvents(List<?> list, int count, long timeoutMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
-        while (list.size() < count && System.currentTimeMillis() < deadline) {
-            Thread.sleep(50);
-        }
+        while (list.size() < count && System.currentTimeMillis() < deadline) Thread.sleep(50);
     }
 
-    // ---- happy-path: reads existing lines ----
+    private static LogTailer tailer(Path dir, String session, String channel, CursorManager cur) {
+        return new LogTailer(dir.toFile(), session, channel, "gpu-trace", cur, new LinkedBlockingQueue<>());
+    }
+
+    private static LogTailer streamTailer(Path dir, String session, String channel, CursorManager cur) {
+        return new LogTailer(dir.toFile(), session, channel, "gpu-trace", cur, new LinkedBlockingQueue<>(),
+                null, new StreamUploadSettings(true, 10, 1_000_000L));
+    }
+
+    // ---- a complete window is sent whole ----
 
     @Test
-    void tail_sassChannel_publishes(@TempDir Path tempDir) throws Exception {
-        // sass.log carries SASS-disassembly / source-content artifacts split
-        // out of device.log; the agent must tail it like any other channel
-        // or those artifacts silently miss live upload.
-        Files.createDirectories(tempDir.resolve("app"));
-        Files.writeString(tempDir.resolve("app/sass.log"),
-            "{\"type\":\"cubin_disassembly\"}\n");
-
-        CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "sass", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 1, 3000);
-        t.interrupt();
-        t.join(2000);
-
-        assertEquals(1, publisher.events.size());
-        assertEquals("cubin_disassembly", publisher.events.get(0).type());
+    void window_readsAndPublishes(@TempDir Path dir) throws Exception {
+        window(dir, "app", "device", 1,
+            "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n{\"type\":\"kernel_event\",\"name\":\"k2\"}\n");
+        var pub = new CapturingPublisher();
+        var t = startTailer(tailer(dir, "app", "device", new CursorManager(dir.resolve("cursor.json").toFile())), pub);
+        awaitEvents(pub.events, 2, 3000);
+        t.interrupt(); t.join(2000);
+        assertEquals(2, pub.events.size());
+        assertEquals("kernel_event", pub.events.get(0).type());
     }
 
     @Test
-    void tail_readsExistingLinesAndPublishes(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        Path logFile = tempDir.resolve("app/device.log");
-        Files.writeString(logFile,
-            "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n" +
-            "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n"
-        );
-
-        CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 2, 3000);
-        t.interrupt();
-        t.join(2000);
-
-        assertEquals(2, publisher.events.size());
-        assertEquals("kernel_event", publisher.events.get(0).type());
-        assertEquals("kernel_event", publisher.events.get(1).type());
+    void window_sassChannel_publishes(@TempDir Path dir) throws Exception {
+        window(dir, "app", "sass", 1, "{\"type\":\"cubin_disassembly\"}\n");
+        var pub = new CapturingPublisher();
+        var t = startTailer(tailer(dir, "app", "sass", new CursorManager(dir.resolve("cursor.json").toFile())), pub);
+        awaitEvents(pub.events, 1, 3000);
+        t.interrupt(); t.join(2000);
+        assertEquals(1, pub.events.size());
+        assertEquals("cubin_disassembly", pub.events.get(0).type());
     }
 
     @Test
-    void tail_skipsBlankLines(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        Path logFile = tempDir.resolve("app/scope.log");
-        Files.writeString(logFile,
-            "{\"type\":\"scope_event\"}\n" +
-            "\n" +
-            "   \n" +
-            "{\"type\":\"scope_event\"}\n"
-        );
-
-        CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "scope", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 2, 3000);
-        t.interrupt();
-        t.join(2000);
-
-        assertEquals(2, publisher.events.size());
+    void window_skipsBlankLines(@TempDir Path dir) throws Exception {
+        window(dir, "app", "scope", 1, "{\"type\":\"scope_event\"}\n\n   \n{\"type\":\"scope_event\"}\n");
+        var pub = new CapturingPublisher();
+        var t = startTailer(tailer(dir, "app", "scope", new CursorManager(dir.resolve("cursor.json").toFile())), pub);
+        awaitEvents(pub.events, 2, 3000);
+        t.interrupt(); t.join(2000);
+        assertEquals(2, pub.events.size());
     }
 
     @Test
-    void tail_invalidJsonLine_doesNotCrash(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        Path logFile = tempDir.resolve("app/system.log");
-        Files.writeString(logFile,
-            "not-json-at-all\n" +
-            "{\"type\":\"system_event\"}\n"
-        );
-
-        CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "system", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 1, 3000);
-        t.interrupt();
-        t.join(2000);
-
-        // Only the valid JSON line is published
-        assertEquals(1, publisher.events.size());
-        assertEquals("system_event", publisher.events.get(0).type());
-    }
-
-    // ---- cursor persistence ----
-
-    @Test
-    void tail_persistsCursorAfterReading(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        Path logFile = tempDir.resolve("app/device.log");
-        Files.writeString(logFile, "{\"type\":\"kernel_event\"}\n");
-
-        File cursorFile = tempDir.resolve("cursor.json").toFile();
-        CursorManager cursorMgr = new CursorManager(cursorFile);
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 1, 3000);
-        t.interrupt();
-        t.join(2000);
-
-        // Reload cursor and verify it advanced
-        CursorManager mgr2 = new CursorManager(cursorFile);
-        CursorPosition pos = mgr2.get("app.device");
-        assertEquals(0, pos.fileIndex());
-        assertTrue(pos.offset() > 0, "Cursor offset should have advanced past the line");
+    void window_invalidJsonLine_doesNotCrash(@TempDir Path dir) throws Exception {
+        window(dir, "app", "system", 1, "not-json-at-all\n{\"type\":\"system_event\"}\n");
+        var pub = new CapturingPublisher();
+        var t = startTailer(tailer(dir, "app", "system", new CursorManager(dir.resolve("cursor.json").toFile())), pub);
+        awaitEvents(pub.events, 1, 3000);
+        t.interrupt(); t.join(2000);
+        assertEquals(1, pub.events.size());
+        assertEquals("system_event", pub.events.get(0).type());
     }
 
     @Test
-    void tail_streamMode_publishesNdjsonBatchAndPersistsCursor(@TempDir Path tempDir) throws Exception {
-        Files.createDirectories(tempDir.resolve("app"));
-        Path logFile = tempDir.resolve("app/device.log");
-        Files.writeString(logFile,
-            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k1\"}\n" +
-            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k2\"}\n"
-        );
+    void window_nullQueue_doesNotThrow(@TempDir Path dir) throws Exception {
+        window(dir, "app", "device", 1, "{\"type\":\"kernel_event\"}\n");
+        var pub = new CapturingPublisher();
+        var t = startTailer(new LogTailer(dir.toFile(), "app", "device", "gpu-trace",
+            new CursorManager(dir.resolve("cursor.json").toFile()), null), pub);
+        awaitEvents(pub.events, 1, 3000);
+        t.interrupt(); t.join(2000);
+        assertEquals(1, pub.events.size());
+    }
 
-        File cursorFile = tempDir.resolve("cursor.json").toFile();
-        CursorManager cursorMgr = new CursorManager(cursorFile);
-        CapturingStreamPublisher publisher = new CapturingStreamPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device",
-                "gpu-trace", cursorMgr, new LinkedBlockingQueue<>(), null,
-                new StreamUploadSettings(true, 10, 1_000_000L));
+    // ---- multiple windows sent in increasing index order ----
 
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.batches, 1, 3000);
-        t.interrupt();
-        t.join(2000);
+    @Test
+    void windows_sentInAscendingOrder(@TempDir Path dir) throws Exception {
+        window(dir, "app", "device", 1, "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n");
+        window(dir, "app", "device", 2, "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n");
+        window(dir, "app", "device", 3, "{\"type\":\"kernel_event\",\"name\":\"k3\"}\n");
+        var pub = new CapturingPublisher();
+        var t = startTailer(tailer(dir, "app", "device", new CursorManager(dir.resolve("cursor.json").toFile())), pub);
+        awaitEvents(pub.events, 3, 4000);
+        t.interrupt(); t.join(2000);
+        assertEquals(3, pub.events.size());
+        assertTrue(pub.events.get(0).data().contains("k1"));
+        assertTrue(pub.events.get(1).data().contains("k2"));
+        assertTrue(pub.events.get(2).data().contains("k3"));
+    }
 
-        assertEquals(List.of("app"), publisher.sessionIds);
-        assertEquals(1, publisher.batches.size());
-        assertEquals(2, publisher.batches.get(0).size());
-        assertTrue(publisher.batches.get(0).get(0).contains("\"k1\""));
+    // ---- gz windows + mid-window resume ----
 
+    @Test
+    void gzWindow_reads(@TempDir Path dir) throws Exception {
+        gzWindow(dir, "app", "device", 1,
+            "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n{\"type\":\"kernel_event\",\"name\":\"k2\"}\n");
+        var pub = new CapturingPublisher();
+        var t = startTailer(tailer(dir, "app", "device", new CursorManager(dir.resolve("cursor.json").toFile())), pub);
+        awaitEvents(pub.events, 2, 3000);
+        t.interrupt(); t.join(2000);
+        assertEquals(2, pub.events.size());
+    }
+
+    @Test
+    void gzWindow_resumesFromOffset(@TempDir Path dir) throws Exception {
+        String l1 = "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n";
+        gzWindow(dir, "app", "device", 1, l1 + "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n");
+        long off = l1.getBytes(StandardCharsets.UTF_8).length;
+        File cursorFile = dir.resolve("cursor.json").toFile();
+        Files.writeString(cursorFile.toPath(), "{\"streams\":{\"app.device\":{\"fileIndex\":1,\"offset\":" + off + "}}}");
+        var pub = new CapturingPublisher();
+        var t = startTailer(tailer(dir, "app", "device", new CursorManager(cursorFile)), pub);
+        awaitEvents(pub.events, 1, 3000);
+        t.interrupt(); t.join(2000);
+        assertEquals(1, pub.events.size(), "only the tail after the offset should be read");
+        assertTrue(pub.events.get(0).data().contains("k2"));
+    }
+
+    // ---- cursor advances past a sent window ----
+
+    @Test
+    void cursor_advancesAfterWindow(@TempDir Path dir) throws Exception {
+        window(dir, "app", "device", 1, "{\"type\":\"kernel_event\"}\n");
+        File cursorFile = dir.resolve("cursor.json").toFile();
+        var pub = new CapturingPublisher();
+        var t = startTailer(tailer(dir, "app", "device", new CursorManager(cursorFile)), pub);
+        awaitEvents(pub.events, 1, 3000);
+        Thread.sleep(200); // let the loop advance the cursor past window 1
+        t.interrupt(); t.join(2000);
         CursorPosition pos = new CursorManager(cursorFile).get("app.device");
-        assertEquals(0, pos.fileIndex());
-        assertTrue(pos.offset() > 0, "Cursor offset should advance after stream batch accept");
+        assertTrue(pos.fileIndex() >= 1, "cursor should sit on/past window 1");
     }
 
     @Test
-    void tail_streamMode_drainsRotatedGzWhenActiveFileMissing(@TempDir Path tempDir) throws Exception {
-        Files.createDirectories(tempDir.resolve("app"));
-        String content =
+    void streamMode_publishesBatch(@TempDir Path dir) throws Exception {
+        window(dir, "app", "device", 1,
             "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k1\"}\n" +
-            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k2\"}\n";
-        Path plain = tempDir.resolve("app/device.1.log");
-        Files.writeString(plain, content);
-        Path gz = tempDir.resolve("app/device.1.log.gz");
-        gzip(plain, gz);
-        Files.delete(plain);
-
-        File cursorFile = tempDir.resolve("cursor.json").toFile();
-        CapturingStreamPublisher publisher = new CapturingStreamPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device",
-                "gpu-trace", new CursorManager(cursorFile), new LinkedBlockingQueue<>(), null,
-                new StreamUploadSettings(true, 10, 1_000_000L));
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.batches, 1, 3000);
-        t.interrupt();
-        t.join(2000);
-
-        assertEquals(1, publisher.batches.size());
-        assertEquals(2, publisher.batches.get(0).size());
-        assertTrue(publisher.batches.get(0).get(1).contains("\"k2\""));
+            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k2\"}\n");
+        var pub = new CapturingStreamPublisher();
+        var t = startTailer(streamTailer(dir, "app", "device", new CursorManager(dir.resolve("cursor.json").toFile())), pub);
+        awaitEvents(pub.batches, 1, 3000);
+        t.interrupt(); t.join(2000);
+        assertEquals(List.of("app"), pub.sessionIds);
+        assertEquals(2, pub.batches.get(0).size());
+        assertTrue(pub.batches.get(0).get(0).contains("\"k1\""));
     }
 
-    // ---- waits when active file is absent ----
-
     @Test
-    void tail_waitsForActiveFileToAppear(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        // No log file exists initially — tailer should wait
-        CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
-
-        Thread t = startTailer(tailer, publisher);
-        Thread.sleep(300); // let it enter the waiting branch
-
-        // Now create the file with content
-        Path logFile = tempDir.resolve("app/device.log");
-        Files.writeString(logFile, "{\"type\":\"kernel_event\"}\n");
-
-        awaitEvents(publisher.events, 1, 5000);
-        t.interrupt();
-        t.join(2000);
-
-        assertEquals(1, publisher.events.size());
+    void streamMode_gzWindow_sentAsOneChunk(@TempDir Path dir) throws Exception {
+        // A .gz window is shipped verbatim as ONE chunk (no decompress/re-batch),
+        // and the cursor advances past it so a crash/restart never re-sends it.
+        gzWindow(dir, "app", "device", 1,
+            "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n{\"type\":\"kernel_event\",\"name\":\"k2\"}\n");
+        File cursorFile = dir.resolve("cursor.json").toFile();
+        var pub = new CapturingStreamPublisher();
+        var t = startTailer(streamTailer(dir, "app", "device", new CursorManager(cursorFile)), pub);
+        awaitEvents(pub.batches, 1, 3000);
+        Thread.sleep(200); // let the window-done advance persist
+        t.interrupt(); t.join(2000);
+        assertEquals(1, pub.batches.size(), "the whole gz window is sent as ONE chunk");
+        assertEquals(2, pub.batches.get(0).size());
+        assertTrue(pub.batches.get(0).get(0).contains("k1"));
+        assertTrue(pub.batches.get(0).get(1).contains("k2"));
+        assertTrue(new CursorManager(cursorFile).get("app.device").fileIndex() >= 2,
+            "cursor must advance past the sent window so a restart does not re-send it");
     }
 
-    // ---- null consumedFilesQueue is handled gracefully ----
+    // ---- waits while the session is still writing (.tmp/ present) ----
 
     @Test
-    void tail_nullQueue_doesNotThrow(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        Path logFile = tempDir.resolve("app/device.log");
-        Files.writeString(logFile, "{\"type\":\"kernel_event\"}\n");
-
-        CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
-        CapturingPublisher publisher = new CapturingPublisher();
-        // Pass null for the queue — should not throw
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, null);
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 1, 3000);
-        t.interrupt();
-        t.join(2000);
-
-        assertEquals(1, publisher.events.size());
+    void waitsWhileTmpPresent_thenSendsLateWindow(@TempDir Path dir) throws Exception {
+        Files.createDirectories(dir.resolve("app/.tmp")); // session writing, no window yet
+        var pub = new CapturingPublisher();
+        var t = startTailer(tailer(dir, "app", "device", new CursorManager(dir.resolve("cursor.json").toFile())), pub);
+        Thread.sleep(300);
+        assertTrue(pub.events.isEmpty(), "no window published yet -> nothing sent");
+        window(dir, "app", "device", 1, "{\"type\":\"kernel_event\"}\n");
+        awaitEvents(pub.events, 1, 5000);
+        t.interrupt(); t.join(2000);
+        assertEquals(1, pub.events.size());
     }
 
-    // ---- log file rotation ----
+    // ---- a finished session (no .tmp/) exits on its own and is not re-uploaded ----
 
     @Test
-    void tail_detects_rotation_and_offersToQueue(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        // Set up: active file exists; then we rename it to .1.log (simulating C++ rotation)
-        // and create a new empty active file.
-        Path activeFile = tempDir.resolve("app/device.log");
-        Files.writeString(activeFile, "{\"type\":\"kernel_event\"}\n");
+    void finishedSession_exitsAndNotReuploaded(@TempDir Path dir) throws Exception {
+        gzWindow(dir, "app", "device", 1,
+            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k1\"}\n" +
+            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k2\"}\n");
+        File cursorFile = dir.resolve("cursor.json").toFile();
 
+        // Run 1: no .tmp/ -> send the one window, then exit on its own (after the finish grace).
+        var pub1 = new CapturingStreamPublisher();
+        var t1 = startTailer(streamTailer(dir, "app", "device", new CursorManager(cursorFile)), pub1);
+        t1.join(8000);
+        assertFalse(t1.isAlive(), "tailer should exit on its own once the finished session is drained");
+        assertEquals(1, pub1.batches.size(), "run 1 sends the finished session once");
+
+        // Run 2: same files + persisted cursor -> nothing re-sent.
+        var pub2 = new CapturingStreamPublisher();
+        var t2 = startTailer(streamTailer(dir, "app", "device", new CursorManager(cursorFile)), pub2);
+        t2.join(8000);
+        assertFalse(t2.isAlive(), "restart of a finished session should exit");
+        assertTrue(pub2.batches.isEmpty(), "a finished session must not be re-uploaded on restart");
+    }
+
+    // ---- the sent window is offered to the archive queue ----
+
+    @Test
+    void sentWindow_offeredToQueue(@TempDir Path dir) throws Exception {
+        Path gz = gzWindow(dir, "app", "device", 1, "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n");
         LinkedBlockingQueue<Path> queue = new LinkedBlockingQueue<>();
-        CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, queue);
-
-        Thread t = startTailer(tailer, publisher);
-        // Wait for tailer to read the line and advance the cursor
-        awaitEvents(publisher.events, 1, 3000);
-        
-        // Stop the tailer thread to release the file lock
-        t.interrupt();
-        t.join(5000);
-
-        // Simulate rotation: rename active → .1.log, create new empty active
-        Path rotatedFile = tempDir.resolve("app/device.1.log");
-        Files.move(activeFile, rotatedFile);
-        Files.createFile(activeFile); // new empty active file
-
-        // Restart tailer to see if it detects the rotation from the persisted cursor
-        t = startTailer(tailer, publisher);
-
-        // The tailer should detect rotation and switch to index 1,
-        // then drain the rotated file (it's already fully read, offset == length)
-        // then offer the rotated path to the queue.
-        Path consumed = queue.poll(5, TimeUnit.SECONDS);
-        t.interrupt();
-        t.join(2000);
-
-        assertNotNull(consumed, "Rotated file should have been offered to the archive queue");
-        assertEquals(rotatedFile.toAbsolutePath(), consumed.toAbsolutePath());
-    }
-
-    // ---- rotated file gone on restart ----
-
-    @Test
-    void tail_rotatedFileGone_fallsBackToActiveFile(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        // Simulate a cursor that points to fileIndex=1 (rotated), but the file no longer exists
-        File cursorFile = tempDir.resolve("cursor.json").toFile();
-        // Write a cursor that says we were reading rotated file index 1 at offset 0
-        java.nio.file.Files.writeString(cursorFile.toPath(), """
-            {
-              "streams": {
-                "app.device": { "fileIndex": 1, "offset": 0 }
-              }
-            }
-            """);
-
-        // Create only the active file (rotated .1.log is gone)
-        Path activeFile = tempDir.resolve("app/device.log");
-        Files.writeString(activeFile, "{\"type\":\"kernel_event\"}\n");
-
-        CursorManager cursorMgr = new CursorManager(cursorFile);
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, new LinkedBlockingQueue<>());
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 1, 5000);
-        t.interrupt();
-        t.join(2000);
-
-        // Should recover and eventually read from the active file
-        assertFalse(publisher.events.isEmpty(), "Should fall back to active file after rotated file is gone");
-    }
-
-    // ---- A: read compressed (.gz) rotated files ----
-
-    @Test
-    void tail_readsGzRotatedFile(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        String content =
-            "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n" +
-            "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
-        Path plain = tempDir.resolve("app/device.1.log");
-        Files.writeString(plain, content);
-        Path gz = tempDir.resolve("app/device.1.log.gz");
-        gzip(plain, gz);
-        Files.delete(plain);                              // only the .gz remains
-        Files.createFile(tempDir.resolve("app/device.log")); // empty active so tailer doesn't just wait
-
-        File cursorFile = tempDir.resolve("cursor.json").toFile();
-        Files.writeString(cursorFile.toPath(),
-            "{\"streams\":{\"app.device\":{\"fileIndex\":1,\"offset\":0}}}");
-
-        CursorManager cursorMgr = new CursorManager(cursorFile);
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
-                cursorMgr, new LinkedBlockingQueue<>());
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 2, 3000);
-        t.interrupt();
-        t.join(2000);
-
-        assertEquals(2, publisher.events.size(), "Both lines should be read from the .gz");
-    }
-
-    @Test
-    void tail_gzResumeFromOffset(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        String l1 = "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n";
-        String l2 = "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
-        Path plain = tempDir.resolve("app/device.1.log");
-        Files.writeString(plain, l1 + l2);
-        Path gz = tempDir.resolve("app/device.1.log.gz");
-        gzip(plain, gz);
-        Files.delete(plain);
-        Files.createFile(tempDir.resolve("app/device.log"));
-
-        long off = l1.getBytes(StandardCharsets.UTF_8).length; // start after the first line
-        File cursorFile = tempDir.resolve("cursor.json").toFile();
-        Files.writeString(cursorFile.toPath(),
-            "{\"streams\":{\"app.device\":{\"fileIndex\":1,\"offset\":" + off + "}}}");
-
-        CursorManager cursorMgr = new CursorManager(cursorFile);
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
-                cursorMgr, new LinkedBlockingQueue<>());
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 1, 3000);
-        t.interrupt();
-        t.join(2000);
-
-        assertEquals(1, publisher.events.size(), "Only the line after the offset should be read");
-        assertTrue(publisher.events.get(0).data().contains("k2"));
-    }
-
-    // ---- D: restart recovers the unread tail after the client compressed it ----
-
-    @Test
-    void tail_restartAfterCompression_recoversUnreadTail(@TempDir Path tempDir) throws Exception {
-        // v1.2: log files live under <tempDir>/<sessionId>/<channel>.log.
-        // Create the session subdir so the tests' writeString calls don't
-        // hit "parent dir doesn't exist" errors. The "app" name is used
-        // throughout as the session_id below (it was the filePrefix in
-        // pre-v1.2 tests — same string, repurposed).
-        Files.createDirectories(tempDir.resolve("app"));
-        Path active = tempDir.resolve("app/device.log");
-        String k1 = "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n";
-        String k2 = "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
-        Files.writeString(active, k1 + k2);
-
-        File cursorFile = tempDir.resolve("cursor.json").toFile();
-
-        // Run 1: publisher accepts k1, rejects k2 → the agent stays "behind" at the
-        // offset after k1, having recorded the file's identity in the cursor.
-        RejectingPublisher pub1 = new RejectingPublisher("k2");
-        LogTailer tailer1 = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
-                new CursorManager(cursorFile), new LinkedBlockingQueue<>());
-        Thread t1 = startTailer(tailer1, pub1);
-        awaitEvents(pub1.events, 1, 3000);  // k1 published
-        Thread.sleep(400);                  // let it attempt+fail k2 and persist the cursor
-        t1.interrupt();
-        t1.join(2000);
-
-        CursorPosition saved = new CursorManager(cursorFile).get("app.device");
-        assertEquals(0, saved.fileIndex());
-        assertEquals(k1.getBytes(StandardCharsets.UTF_8).length, saved.offset(),
-                "cursor should sit just after k1");
-        assertTrue(saved.headSig() != 0L, "file identity (headSig) should be captured");
-
-        // Simulate the client rotating AND immediately compressing: the old active
-        // content lands in .1.log.gz, the active file is replaced with fresh content.
-        Path gz = tempDir.resolve("app/device.1.log.gz");
-        gzip(active, gz);
-        Files.delete(active);
-        String k3 = "{\"type\":\"kernel_event\",\"name\":\"k3\"}\n";
-        Files.writeString(active, k3);
-
-        // Run 2: without A+D the k2 tail (now only inside the .gz) would be lost.
-        CapturingPublisher pub2 = new CapturingPublisher();
-        LogTailer tailer2 = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
-                new CursorManager(cursorFile), new LinkedBlockingQueue<>());
-        Thread t2 = startTailer(tailer2, pub2);
-        awaitEvents(pub2.events, 2, 5000);  // k2 (recovered from gz) + k3 (new active)
-        t2.interrupt();
-        t2.join(2000);
-
-        List<String> datas = pub2.events.stream().map(LogWrapper::data).toList();
-        assertTrue(datas.stream().anyMatch(d -> d.contains("k2")),
-                "k2 must be recovered from the compressed rotated file");
-        assertTrue(datas.stream().anyMatch(d -> d.contains("k3")),
-                "k3 from the new active file should also be read");
-    }
-
-    // ---- compressed-active: a cleanly-shut-down session whose active file
-    //      was compressed IN PLACE to <channel>.log.gz (no rotation index) ----
-
-    @Test
-    void tail_drainsCompressedActiveFile(@TempDir Path tempDir) throws Exception {
-        // On a clean shutdown the client compresses the active <channel>.log in
-        // place to <channel>.log.gz and removes the .log — there is no .log and
-        // no .N.log.gz. The tailer must still ingest this finished session.
-        Files.createDirectories(tempDir.resolve("app"));
-        String content =
-            "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n" +
-            "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
-        Path plain = tempDir.resolve("app/device.log");
-        Files.writeString(plain, content);
-        Path gz = tempDir.resolve("app/device.log.gz");
-        gzip(plain, gz);
-        Files.delete(plain); // only the compressed-active .log.gz remains
-
-        LinkedBlockingQueue<Path> queue = new LinkedBlockingQueue<>();
-        CursorManager cursorMgr = new CursorManager(tempDir.resolve("cursor.json").toFile());
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace", cursorMgr, queue);
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 2, 3000);
+        var pub = new CapturingPublisher();
+        var t = startTailer(new LogTailer(dir.toFile(), "app", "device", "gpu-trace",
+            new CursorManager(dir.resolve("cursor.json").toFile()), queue), pub);
         Path consumed = queue.poll(3, TimeUnit.SECONDS);
-        t.interrupt();
-        t.join(2000);
-
-        assertEquals(2, publisher.events.size(),
-                "Both lines should be read from the compressed-active .log.gz");
-        assertNotNull(consumed, "Compressed-active file should be offered to the archive queue");
+        t.interrupt(); t.join(2000);
+        assertNotNull(consumed, "the sent window should be offered to the archive queue");
         assertEquals(gz.toAbsolutePath(), consumed.toAbsolutePath());
-    }
-
-    @Test
-    void tail_compressedActive_resumesFromOffset(@TempDir Path tempDir) throws Exception {
-        // Live-tail handoff: we'd already published k1 from <channel>.log when the
-        // client compressed it in place. Resuming from the saved offset must yield
-        // only the unread tail (k2) — no duplicate of k1.
-        Files.createDirectories(tempDir.resolve("app"));
-        String l1 = "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n";
-        String l2 = "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n";
-        Path plain = tempDir.resolve("app/device.log");
-        Files.writeString(plain, l1 + l2);
-        Path gz = tempDir.resolve("app/device.log.gz");
-        gzip(plain, gz);
-        Files.delete(plain);
-
-        long off = l1.getBytes(StandardCharsets.UTF_8).length; // resume after k1
-        File cursorFile = tempDir.resolve("cursor.json").toFile();
-        Files.writeString(cursorFile.toPath(),
-            "{\"streams\":{\"app.device\":{\"fileIndex\":0,\"offset\":" + off + "}}}");
-
-        CursorManager cursorMgr = new CursorManager(cursorFile);
-        CapturingPublisher publisher = new CapturingPublisher();
-        LogTailer tailer = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
-                cursorMgr, new LinkedBlockingQueue<>());
-
-        Thread t = startTailer(tailer, publisher);
-        awaitEvents(publisher.events, 1, 3000);
-        t.interrupt();
-        t.join(2000);
-
-        assertEquals(1, publisher.events.size(), "Only the tail after the offset should be read");
-        assertTrue(publisher.events.get(0).data().contains("k2"));
-    }
-
-    // ---- A finished session is not re-uploaded when the agent restarts ----
-
-    @Test
-    void tail_finishedRotatedGzSession_notReuploadedOnRestart(@TempDir Path tempDir) throws Exception {
-        // A finished session whose channel rotated: only <channel>.1.log.gz
-        // remains (no active <channel>.log). Run 1 drains it fully and tail()
-        // returns. Run 2 over the SAME files + cursor must NOT re-publish: the
-        // cursor left at the gz's EOF makes the restart skip-to-EOF and exit.
-        //
-        // Regression: the terminal "session finished" branch used to reset the
-        // cursor to offset 0 while keeping the file identity, so run 2 re-located
-        // the gz by content signature and re-uploaded the whole session - which
-        // the backend then rejected with 409 "session already uploaded", looping
-        // forever.
-        Files.createDirectories(tempDir.resolve("app"));
-        String content =
-            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k1\"}\n" +
-            "{\"type\":\"kernel_event\",\"session_id\":\"app\",\"name\":\"k2\"}\n";
-        Path plain = tempDir.resolve("app/device.1.log");
-        Files.writeString(plain, content);
-        Path gz = tempDir.resolve("app/device.1.log.gz");
-        gzip(plain, gz);
-        Files.delete(plain); // finished: only the rotated .gz remains, no active .log
-
-        File cursorFile = tempDir.resolve("cursor.json").toFile();
-
-        // Run 1: drains the gz fully; tail() returns on "session finished".
-        CapturingStreamPublisher pub1 = new CapturingStreamPublisher();
-        LogTailer tailer1 = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
-                new CursorManager(cursorFile), new LinkedBlockingQueue<>(), null,
-                new StreamUploadSettings(true, 10, 1_000_000L));
-        Thread t1 = startTailer(tailer1, pub1);
-        awaitEvents(pub1.batches, 1, 3000);
-        t1.join(3000); // tail() exits by itself once the finished session is drained
-        assertFalse(t1.isAlive(), "tailer should exit on its own after draining a finished session");
-        assertEquals(1, pub1.batches.size(), "run 1 publishes the finished session once");
-
-        // Run 2: same files, same persisted cursor. Must NOT re-publish anything.
-        CapturingStreamPublisher pub2 = new CapturingStreamPublisher();
-        LogTailer tailer2 = new LogTailer(tempDir.toFile(), "app", "device", "gpu-trace",
-                new CursorManager(cursorFile), new LinkedBlockingQueue<>(), null,
-                new StreamUploadSettings(true, 10, 1_000_000L));
-        Thread t2 = startTailer(tailer2, pub2);
-        t2.join(3000); // should skip-to-EOF and exit immediately
-        assertFalse(t2.isAlive(), "restart of a finished session should exit immediately");
-        assertTrue(pub2.batches.isEmpty(),
-                "a finished session must NOT be re-uploaded on restart (got " + pub2.batches + ")");
     }
 }
