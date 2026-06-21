@@ -61,7 +61,10 @@ jacoco {
 def jacocoExcludes = [
     '**/LogArchiver.class',
     '**/KafkaPublisher.class',
-    '**/Main.class'
+    '**/Main.class',
+    '**/GpuflAgent.class',
+    '**/SessionWatcher.class',
+    '**/TailerManager.class'
 ]
 
 jacocoTestReport {

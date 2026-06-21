@@ -1,5 +1,6 @@
 package com.gpuflight.agent;
 
+import com.gpuflight.agent.config.ConfigLoader;
 import com.gpuflight.agent.config.HttpConfig;
 import com.gpuflight.agent.config.KafkaConfig;
 import com.gpuflight.agent.model.AgentConfig;
@@ -26,38 +27,38 @@ class MainTest {
     @Test
     void resolve_returnsFlagValue() {
         String[] args = {"--host=http://example.com", "--token=abc"};
-        assertEquals("http://example.com", Main.resolve(args, "host", "GPUFL_HTTP_HOST", null, Collections.emptyMap()));
+        assertEquals("http://example.com", ConfigLoader.resolve(args, "host", "GPUFL_HTTP_HOST", null, Collections.emptyMap()));
     }
 
     @Test
     void resolve_returnsSecondFlagValue() {
         String[] args = {"--host=http://example.com", "--token=abc"};
-        assertEquals("abc", Main.resolve(args, "token", "GPUFL_HTTP_TOKEN", null, Collections.emptyMap()));
+        assertEquals("abc", ConfigLoader.resolve(args, "token", "GPUFL_HTTP_TOKEN", null, Collections.emptyMap()));
     }
 
     @Test
     void resolve_returnsDefaultWhenAbsent() {
         String[] args = {};
-        assertEquals("default-val", Main.resolve(args, "missing-flag", "GPUFL_MISSING_VAR_XYZ123", "default-val", Collections.emptyMap()));
+        assertEquals("default-val", ConfigLoader.resolve(args, "missing-flag", "GPUFL_MISSING_VAR_XYZ123", "default-val", Collections.emptyMap()));
     }
 
     @Test
     void resolve_returnsNullDefaultWhenAbsent() {
         String[] args = {};
-        assertNull(Main.resolve(args, "missing-flag", "GPUFL_MISSING_VAR_XYZ123", null, Collections.emptyMap()));
+        assertNull(ConfigLoader.resolve(args, "missing-flag", "GPUFL_MISSING_VAR_XYZ123", null, Collections.emptyMap()));
     }
 
     @Test
     void resolve_flagTakesPrecedenceOverDefault() {
         String[] args = {"--folder=/from-cli"};
-        assertEquals("/from-cli", Main.resolve(args, "folder", "GPUFL_SOURCE_FOLDER_NOTSET_XYZ", "/default", Collections.emptyMap()));
+        assertEquals("/from-cli", ConfigLoader.resolve(args, "folder", "GPUFL_SOURCE_FOLDER_NOTSET_XYZ", "/default", Collections.emptyMap()));
     }
 
     @Test
     void resolve_partialMatchDoesNotReturn() {
         // --folderExtra should not match --folder=
         String[] args = {"--folderExtra=/wrong"};
-        assertNull(Main.resolve(args, "folder", "GPUFL_MISSING_XYZ123", null, Collections.emptyMap()));
+        assertNull(ConfigLoader.resolve(args, "folder", "GPUFL_MISSING_XYZ123", null, Collections.emptyMap()));
     }
 
     // ---- env var support ----
@@ -66,39 +67,39 @@ class MainTest {
     void resolve_returnsEnvVarWhenFlagAbsent() {
         String[] args = {};
         Map<String, String> env = Map.of("GPUFL_HTTP_HOST", "http://env-url.com");
-        assertEquals("http://env-url.com", Main.resolve(args, "host", "GPUFL_HTTP_HOST", null, env));
+        assertEquals("http://env-url.com", ConfigLoader.resolve(args, "host", "GPUFL_HTTP_HOST", null, env));
     }
 
     @Test
     void resolve_flagTakesPrecedenceOverEnvVar() {
         String[] args = {"--host=http://cli-url.com"};
         Map<String, String> env = Map.of("GPUFL_HTTP_HOST", "http://env-url.com");
-        assertEquals("http://cli-url.com", Main.resolve(args, "host", "GPUFL_HTTP_HOST", null, env));
+        assertEquals("http://cli-url.com", ConfigLoader.resolve(args, "host", "GPUFL_HTTP_HOST", null, env));
     }
 
     // ---- log type parsing ----
 
     @Test
     void parseLogTypes_trimsAndDropsEmptyValues() {
-        assertEquals(List.of("system", "device"), Main.parseLogTypes(" system, ,device,"));
+        assertEquals(List.of("system", "device"), ConfigLoader.parseLogTypes(" system, ,device,"));
     }
 
     @Test
     void parseLogTypes_returnsNullForMissingOrEmptyValues() {
-        assertNull(Main.parseLogTypes(null));
-        assertNull(Main.parseLogTypes(" , "));
+        assertNull(ConfigLoader.parseLogTypes(null));
+        assertNull(ConfigLoader.parseLogTypes(" , "));
     }
 
     @Test
     void logTypesOrDefault_usesExplicitFolderLogTypes() {
         String[] args = {"--folders=/logs", "--log-types=system"};
-        assertEquals(List.of("system"), Main.logTypesOrDefault(args, Collections.emptyMap()));
+        assertEquals(List.of("system"), ConfigLoader.logTypesOrDefault(args, Collections.emptyMap()));
     }
 
     @Test
     void logTypesOrDefault_usesDefaultWhenAbsent() {
         assertEquals(List.of("device", "scope", "system", "sass"),
-            Main.logTypesOrDefault(new String[]{}, Collections.emptyMap()));
+            ConfigLoader.logTypesOrDefault(new String[]{}, Collections.emptyMap()));
     }
 
     // ---- require() ----
@@ -106,7 +107,7 @@ class MainTest {
     @Test
     void require_returnsValueWhenPresent() {
         String[] args = {"--folder=/tmp/logs"};
-        assertEquals("/tmp/logs", Main.require(args, "folder", "GPUFL_SOURCE_FOLDER", Collections.emptyMap()));
+        assertEquals("/tmp/logs", ConfigLoader.require(args, "folder", "GPUFL_SOURCE_FOLDER", Collections.emptyMap()));
     }
 
     // ---- parseConfigArg() ----
@@ -114,18 +115,18 @@ class MainTest {
     @Test
     void parseConfigArg_returnsPath() {
         String[] args = {"--config=/etc/agent.json", "--other=val"};
-        assertEquals("/etc/agent.json", Main.parseConfigArg(args));
+        assertEquals("/etc/agent.json", ConfigLoader.parseConfigArg(args));
     }
 
     @Test
     void parseConfigArg_returnsNullWhenAbsent() {
         String[] args = {"--folder=/tmp"};
-        assertNull(Main.parseConfigArg(args));
+        assertNull(ConfigLoader.parseConfigArg(args));
     }
 
     @Test
     void parseConfigArg_emptyArgs() {
-        assertNull(Main.parseConfigArg(new String[]{}));
+        assertNull(ConfigLoader.parseConfigArg(new String[]{}));
     }
 
     // ---- buildArchiveKey() ----
@@ -133,19 +134,19 @@ class MainTest {
     @Test
     void buildArchiveKey_concatenatesPrefixAndFilename() {
         Path path = Path.of("/var/log/gpuflight/device.1.log");
-        assertEquals("raw-events/device.1.log", Main.buildArchiveKey("raw-events/", path));
+        assertEquals("raw-events/device.1.log", ConfigLoader.buildArchiveKey("raw-events/", path));
     }
 
     @Test
     void buildArchiveKey_emptyPrefix() {
         Path path = Path.of("/some/dir/file.log");
-        assertEquals("file.log", Main.buildArchiveKey("", path));
+        assertEquals("file.log", ConfigLoader.buildArchiveKey("", path));
     }
 
     @Test
     void buildArchiveKey_nestedPath() {
         Path path = Path.of("/a/b/c/my.scope.2.log");
-        assertEquals("prefix/my.scope.2.log", Main.buildArchiveKey("prefix/", path));
+        assertEquals("prefix/my.scope.2.log", ConfigLoader.buildArchiveKey("prefix/", path));
     }
 
     // ---- loadFromArgs() — no flags → classpath fallback ----
@@ -154,7 +155,7 @@ class MainTest {
     void loadFromArgs_noArgsUsesClasspathConfig() {
         boolean hasGpuflEnv = System.getenv().keySet().stream().anyMatch(k -> k.startsWith("GPUFL_"));
         if (!hasGpuflEnv) {
-            AgentConfig config = Main.loadFromArgs(new String[]{});
+            AgentConfig config = ConfigLoader.loadFromArgs(new String[]{});
             assertNotNull(config);
             assertNotNull(config.source());
             assertEquals(".", config.source().folder());
@@ -171,7 +172,7 @@ class MainTest {
             "--folder=/var/log", "--type=http",
             "--host=http://localhost:8080"
         };
-        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
+        AgentConfig config = ConfigLoader.loadFromArgs(args, Collections.emptyMap());
         assertNotNull(config);
         assertEquals("/var/log", config.source().folder());
         assertInstanceOf(HttpConfig.class, config.publisher());
@@ -190,7 +191,7 @@ class MainTest {
             "--folder=/logs", "--type=http",
             "--host=http://collector:8080", "--token=tok123"
         };
-        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
+        AgentConfig config = ConfigLoader.loadFromArgs(args, Collections.emptyMap());
         HttpConfig http = (HttpConfig) config.publisher();
         assertEquals("tok123", http.authToken());
     }
@@ -201,7 +202,7 @@ class MainTest {
             "--folder=/logs", "--type=http",
             "--host=http://collector:8080", "--timeout=30"
         };
-        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
+        AgentConfig config = ConfigLoader.loadFromArgs(args, Collections.emptyMap());
         HttpConfig http = (HttpConfig) config.publisher();
         assertEquals(30L, http.timeoutSeconds());
     }
@@ -215,7 +216,7 @@ class MainTest {
             "--brokers=broker1:9092,broker2:9092",
             "--topic-prefix=my-topic", "--compression=lz4"
         };
-        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
+        AgentConfig config = ConfigLoader.loadFromArgs(args, Collections.emptyMap());
         assertInstanceOf(KafkaConfig.class, config.publisher());
         KafkaConfig kafka = (KafkaConfig) config.publisher();
         assertEquals("broker1:9092,broker2:9092", kafka.bootstrapServers());
@@ -229,7 +230,7 @@ class MainTest {
             "--folder=/var/log", "--type=kafka",
             "--brokers=localhost:9092"
         };
-        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
+        AgentConfig config = ConfigLoader.loadFromArgs(args, Collections.emptyMap());
         KafkaConfig kafka = (KafkaConfig) config.publisher();
         // KafkaConfig compact constructor replaces null with defaults
         assertEquals("gpu-trace", kafka.topicPrefix());
@@ -247,7 +248,7 @@ class MainTest {
             "--archiver-access-key=AKIAKEY",
             "--archiver-secret-key=SECRET"
         };
-        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
+        AgentConfig config = ConfigLoader.loadFromArgs(args, Collections.emptyMap());
         assertNotNull(config.archiver());
         assertEquals("http://minio:9000", config.archiver().endpoint());
         assertEquals("my-bucket", config.archiver().bucket());
@@ -270,7 +271,7 @@ class MainTest {
             "--archiver-prefix=logs/",
             "--archiver-delete=true"
         };
-        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
+        AgentConfig config = ConfigLoader.loadFromArgs(args, Collections.emptyMap());
         ArchiverConfig archiver = config.archiver();
         assertNotNull(archiver);
         assertEquals("us-east-1", archiver.region());
@@ -283,7 +284,7 @@ class MainTest {
         String[] args = {
             "--folder=/logs", "--type=http", "--host=http://localhost"
         };
-        AgentConfig config = Main.loadFromArgs(args, Collections.emptyMap());
+        AgentConfig config = ConfigLoader.loadFromArgs(args, Collections.emptyMap());
         assertNull(config.archiver());
     }
 
@@ -302,7 +303,7 @@ class MainTest {
 
         // Invoke via parseConfigArg + direct public method chain
         String[] args = {"--config=" + configFile.getAbsolutePath()};
-        String configPath = Main.parseConfigArg(args);
+        String configPath = ConfigLoader.parseConfigArg(args);
         assertNotNull(configPath);
         assertEquals(configFile.getAbsolutePath(), configPath);
     }
@@ -320,7 +321,7 @@ class MainTest {
         File configFile = tempDir.resolve("ext.json").toFile();
         Files.writeString(configFile.toPath(), json);
 
-        Method m = Main.class.getDeclaredMethod("loadExternalConfig", String.class);
+        Method m = ConfigLoader.class.getDeclaredMethod("loadExternalConfig", String.class);
         m.setAccessible(true);
         AgentConfig config = (AgentConfig) m.invoke(null, configFile.getAbsolutePath());
 
@@ -340,7 +341,7 @@ class MainTest {
         File configFile = tempDir.resolve("kafka.json").toFile();
         Files.writeString(configFile.toPath(), json);
 
-        Method m = Main.class.getDeclaredMethod("loadExternalConfig", String.class);
+        Method m = ConfigLoader.class.getDeclaredMethod("loadExternalConfig", String.class);
         m.setAccessible(true);
         AgentConfig config = (AgentConfig) m.invoke(null, configFile.getAbsolutePath());
 
@@ -367,7 +368,7 @@ class MainTest {
         File configFile = tempDir.resolve("arch.json").toFile();
         Files.writeString(configFile.toPath(), json);
 
-        Method m = Main.class.getDeclaredMethod("loadExternalConfig", String.class);
+        Method m = ConfigLoader.class.getDeclaredMethod("loadExternalConfig", String.class);
         m.setAccessible(true);
         AgentConfig config = (AgentConfig) m.invoke(null, configFile.getAbsolutePath());
 
@@ -392,7 +393,7 @@ class MainTest {
         File configFile = tempDir.resolve("multi.json").toFile();
         Files.writeString(configFile.toPath(), json);
 
-        Method m = Main.class.getDeclaredMethod("loadExternalConfig", String.class);
+        Method m = ConfigLoader.class.getDeclaredMethod("loadExternalConfig", String.class);
         m.setAccessible(true);
         AgentConfig config = (AgentConfig) m.invoke(null, configFile.getAbsolutePath());
 
@@ -418,7 +419,7 @@ class MainTest {
         File configFile = tempDir.resolve("both.json").toFile();
         Files.writeString(configFile.toPath(), json);
 
-        Method m = Main.class.getDeclaredMethod("loadExternalConfig", String.class);
+        Method m = ConfigLoader.class.getDeclaredMethod("loadExternalConfig", String.class);
         m.setAccessible(true);
         AgentConfig config = (AgentConfig) m.invoke(null, configFile.getAbsolutePath());
 
@@ -434,26 +435,26 @@ class MainTest {
 
     @Test
     void topicPrefix_httpConfig_returnsGpuTrace() {
-        AgentConfig config = Main.loadFromArgs(new String[]{
+        AgentConfig config = ConfigLoader.loadFromArgs(new String[]{
             "--folder=/logs", "--type=http", "--host=http://localhost"
         });
-        assertEquals("gpu-trace", Main.topicPrefix(config));
+        assertEquals("gpu-trace", GpuflAgent.topicPrefix(config));
     }
 
     @Test
     void topicPrefix_kafkaConfig_returnsConfiguredPrefix() {
-        AgentConfig config = Main.loadFromArgs(new String[]{
+        AgentConfig config = ConfigLoader.loadFromArgs(new String[]{
             "--folder=/logs", "--type=kafka",
             "--brokers=localhost:9092", "--topic-prefix=my-prefix"
         });
-        assertEquals("my-prefix", Main.topicPrefix(config));
+        assertEquals("my-prefix", GpuflAgent.topicPrefix(config));
     }
 
     // ---- loadClasspathConfig (private) via reflection ----
 
     @Test
     void loadClasspathConfig_loadsLocalJson() throws Exception {
-        Method m = Main.class.getDeclaredMethod("loadClasspathConfig", String.class);
+        Method m = ConfigLoader.class.getDeclaredMethod("loadClasspathConfig", String.class);
         m.setAccessible(true);
         AgentConfig config = (AgentConfig) m.invoke(null, "config/local.json");
 
@@ -465,22 +466,22 @@ class MainTest {
 
     @Test
     void parseExitWhenDrained_onForEnvOrFlag() {
-        assertTrue(Main.parseExitWhenDrained(new String[]{}, Map.of("GPUFL_AGENT_EXIT_WHEN_DRAINED", "1")));
-        assertTrue(Main.parseExitWhenDrained(new String[]{"--exit-when-drained=true"}, Collections.emptyMap()));
+        assertTrue(ConfigLoader.parseExitWhenDrained(new String[]{}, Map.of("GPUFL_AGENT_EXIT_WHEN_DRAINED", "1")));
+        assertTrue(ConfigLoader.parseExitWhenDrained(new String[]{"--exit-when-drained=true"}, Collections.emptyMap()));
     }
 
     @Test
     void parseExitWhenDrained_offWhenAbsentOrFalsey() {
-        assertFalse(Main.parseExitWhenDrained(new String[]{}, Collections.emptyMap()));
-        assertFalse(Main.parseExitWhenDrained(new String[]{}, Map.of("GPUFL_AGENT_EXIT_WHEN_DRAINED", "0")));
-        assertFalse(Main.parseExitWhenDrained(new String[]{"--exit-when-drained=false"}, Collections.emptyMap()));
+        assertFalse(ConfigLoader.parseExitWhenDrained(new String[]{}, Collections.emptyMap()));
+        assertFalse(ConfigLoader.parseExitWhenDrained(new String[]{}, Map.of("GPUFL_AGENT_EXIT_WHEN_DRAINED", "0")));
+        assertFalse(ConfigLoader.parseExitWhenDrained(new String[]{"--exit-when-drained=false"}, Collections.emptyMap()));
     }
 
     @Test
     void anyActiveSession_trueWhenSessionStillWriting(@TempDir Path dir) throws IOException {
         File folder = dir.toFile();
         Files.createDirectories(new File(new File(folder, "sess-1"), ".tmp").toPath()); // .tmp = active
-        assertTrue(Main.anyActiveSession(List.of(folder)));
+        assertTrue(GpuflAgent.anyActiveSession(List.of(folder)));
     }
 
     @Test
@@ -489,8 +490,8 @@ class MainTest {
         File session = new File(folder, "sess-1");
         Files.createDirectories(session.toPath());
         Files.writeString(new File(session, "device.1.log.gz").toPath(), "x"); // finished window, no .tmp
-        assertFalse(Main.anyActiveSession(List.of(folder)));
-        assertFalse(Main.anyActiveSession(List.of(new File(folder, "missing")))); // non-existent folder
+        assertFalse(GpuflAgent.anyActiveSession(List.of(folder)));
+        assertFalse(GpuflAgent.anyActiveSession(List.of(new File(folder, "missing")))); // non-existent folder
     }
 
     // ---- printUsage() — smoke test ----
@@ -500,7 +501,7 @@ class MainTest {
         PrintStream original = System.err;
         try {
             System.setErr(new PrintStream(PrintStream.nullOutputStream()));
-            Main.printUsage();
+            ConfigLoader.printUsage();
         } finally {
             System.setErr(original);
         }
