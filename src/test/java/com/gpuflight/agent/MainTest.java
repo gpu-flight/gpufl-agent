@@ -461,6 +461,38 @@ class MainTest {
         assertEquals(".", config.source().folder());
     }
 
+    // ---- exit-when-drained helpers ----
+
+    @Test
+    void parseExitWhenDrained_onForEnvOrFlag() {
+        assertTrue(Main.parseExitWhenDrained(new String[]{}, Map.of("GPUFL_AGENT_EXIT_WHEN_DRAINED", "1")));
+        assertTrue(Main.parseExitWhenDrained(new String[]{"--exit-when-drained=true"}, Collections.emptyMap()));
+    }
+
+    @Test
+    void parseExitWhenDrained_offWhenAbsentOrFalsey() {
+        assertFalse(Main.parseExitWhenDrained(new String[]{}, Collections.emptyMap()));
+        assertFalse(Main.parseExitWhenDrained(new String[]{}, Map.of("GPUFL_AGENT_EXIT_WHEN_DRAINED", "0")));
+        assertFalse(Main.parseExitWhenDrained(new String[]{"--exit-when-drained=false"}, Collections.emptyMap()));
+    }
+
+    @Test
+    void anyActiveSession_trueWhenSessionStillWriting(@TempDir Path dir) throws IOException {
+        File folder = dir.toFile();
+        Files.createDirectories(new File(new File(folder, "sess-1"), ".tmp").toPath()); // .tmp = active
+        assertTrue(Main.anyActiveSession(List.of(folder)));
+    }
+
+    @Test
+    void anyActiveSession_falseWhenDrainedOrEmpty(@TempDir Path dir) throws IOException {
+        File folder = dir.toFile();
+        File session = new File(folder, "sess-1");
+        Files.createDirectories(session.toPath());
+        Files.writeString(new File(session, "device.1.log.gz").toPath(), "x"); // finished window, no .tmp
+        assertFalse(Main.anyActiveSession(List.of(folder)));
+        assertFalse(Main.anyActiveSession(List.of(new File(folder, "missing")))); // non-existent folder
+    }
+
     // ---- printUsage() — smoke test ----
 
     @Test
