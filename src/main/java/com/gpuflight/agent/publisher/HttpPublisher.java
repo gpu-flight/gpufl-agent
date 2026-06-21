@@ -84,47 +84,66 @@ public class HttpPublisher implements Publisher {
         try {
             String ndjson = String.join("\n", ndjsonLines) + "\n";
             byte[] body = gzip(ndjson.getBytes(StandardCharsets.UTF_8));
-            String url = config.streamEndpoint();
-            System.out.println("[agent] HTTP stream POST starting: url=" + url
-                + " session=" + sessionId
-                + " lines=" + ndjsonLines.size()
-                + " gzipBytes=" + body.length);
+            System.out.println("[agent] HTTP stream POST starting: url=" + config.streamEndpoint()
+                + " session=" + sessionId + " lines=" + ndjsonLines.size() + " gzipBytes=" + body.length);
+            return postGzStream(sessionId, body);
+        } catch (Exception e) {
+            System.out.println("HTTP stream connection error: " + e);
+            return false;
+        }
+    }
 
+    @Override
+    public boolean publishStreamGz(String sessionId, byte[] gzBody) {
+        if (gzBody == null || gzBody.length == 0) {
+            return true;
+        }
+        System.out.println("[agent] HTTP stream POST starting (gz window): url=" + config.streamEndpoint()
+            + " session=" + sessionId + " gzipBytes=" + gzBody.length);
+        return postGzStream(sessionId, gzBody);
+    }
+
+    /**
+     * POST an already-gzipped NDJSON body to the stream endpoint and interpret the
+     * status. 2xx (accepted), 409 (already finalized on a restart) and 402 (limit)
+     * all advance; anything else is a retryable failure.
+     */
+    private boolean postGzStream(String sessionId, byte[] gzBody) {
+        try {
+            String url = config.streamEndpoint();
             var requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("Content-Type", "application/x-ndjson")
                 .header("Content-Encoding", "gzip")
                 .header("X-GpuFlight-Session-Id", sessionId)
                 .header("X-GpuFlight-Hostname", InetAddress.getLocalHost().getHostName())
-                .POST(HttpRequest.BodyPublishers.ofByteArray(body));
+                .POST(HttpRequest.BodyPublishers.ofByteArray(gzBody));
 
             addAuthHeader(requestBuilder);
 
             var response = client.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() >= 200 && response.statusCode() <= 299) {
-                System.out.println("[agent] HTTP stream POST accepted: status="
-                    + response.statusCode() + " session=" + sessionId);
+            int sc = response.statusCode();
+            if (sc >= 200 && sc <= 299) {
+                System.out.println("[agent] HTTP stream POST accepted: status=" + sc + " session=" + sessionId);
                 return true;
             }
-            if (response.statusCode() == 409) {
+            if (sc == 409) {
                 // Session already finalized on the backend - typically this agent
-                // re-tailing a finished session after a restart. The data is
-                // already stored and re-profiling is required to replace it, so
-                // retrying NEVER succeeds. Advance like a 2xx (mirrors the 402
-                // handling in publish()) so the tailer drains to EOF and exits
-                // instead of re-POSTing the same batch every 5s forever.
+                // re-tailing a finished session after a restart. The data is already
+                // stored and re-profiling is required to replace it, so retrying NEVER
+                // succeeds. Advance like a 2xx so the tailer finishes instead of
+                // re-POSTing forever.
                 System.out.println("[agent] HTTP stream POST: session already uploaded (409) - "
                     + "skipping, session=" + sessionId);
                 return true;
             }
-            if (response.statusCode() == 402) {
+            if (sc == 402) {
                 // GPU/workspace limit exceeded - permanent; retrying won't help.
                 System.err.println("[GPUFL] GPU limit exceeded for this workspace - "
                     + "skipping session=" + sessionId + ". " + response.body());
                 return true;
             }
-            System.out.println("HTTP stream publish failed [" + url + "]: "
-                + response.statusCode() + " - " + response.body());
+            System.out.println("HTTP stream publish failed [" + url + "]: " + sc + " - " + response.body());
             return false;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

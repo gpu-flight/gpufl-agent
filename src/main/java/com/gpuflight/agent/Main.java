@@ -32,6 +32,14 @@ public class Main {
         Publisher publisher = PublisherFactory.create(config.publisher());
         System.out.println("[agent] Publisher: " + config.publisher().getClass().getSimpleName());
 
+        // One-shot mode for the launcher-driven `gpufl trace` upload: exit once every
+        // discovered session has fully drained, so the launcher can wait for a clean finish
+        // instead of hard-killing the agent mid-upload (which dropped late windows).
+        boolean exitWhenDrained = parseExitWhenDrained(args, System.getenv());
+        if (exitWhenDrained) {
+            System.out.println("[agent] exit-when-drained mode enabled");
+        }
+
         // In v1.2 a "source" is just a FOLDER to watch - each run writes its
         // logs under <folder>/<session_id>/<channel>.log[.gz], so sessions are
         // auto-discovered (no per-session config). Collect every folder to
@@ -94,6 +102,11 @@ public class Main {
         // re-watched, so this set also marks "done" for the agent's lifetime.)
         var startedSessions = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
 
+        // Live per-channel tailer tasks across ALL sessions. The exit-when-drained monitor
+        // exits the agent once this returns to 0 (after >=1 session was seen and nothing is
+        // still being written).
+        var activeTailers = new java.util.concurrent.atomic.AtomicInteger(0);
+
         // Spawn the per-channel tailer set for one discovered session.
         // Idempotent - a second call for the same (folder, session_id) is a
         // no-op, so the rescan can call it freely without re-announcing.
@@ -112,19 +125,24 @@ public class Main {
             var remaining = new java.util.concurrent.atomic.AtomicInteger(session.logTypes().size());
             String sid = session.sessionId();
             for (String type : session.logTypes()) {
+                activeTailers.incrementAndGet();
                 executor.submit(() -> {
-                    // Only the "system" channel carries device_metric_batch events.
-                    var dedup = "system".equals(type) ? deduplicator : null;
-                    var tailer = new LogTailer(session.folder(), session.sessionId(), type,
-                                               topicPrefix, cursorMgr, consumedFilesQueue, dedup,
-                                               streamUploadSettings);
-                    tailer.tail(publisher);
-                    // Reached only when tail() returns. Skip on interruption (agent
-                    // shutdown) so an in-flight upload is never declared complete.
-                    if (!Thread.currentThread().isInterrupted()
-                            && remaining.decrementAndGet() == 0
-                            && streamUploadSettings.enabled()) {
-                        signalSessionComplete(publisher, sid);
+                    try {
+                        // Only the "system" channel carries device_metric_batch events.
+                        var dedup = "system".equals(type) ? deduplicator : null;
+                        var tailer = new LogTailer(session.folder(), session.sessionId(), type,
+                                                   topicPrefix, cursorMgr, consumedFilesQueue, dedup,
+                                                   streamUploadSettings);
+                        tailer.tail(publisher);
+                        // Reached only when tail() returns. Skip on interruption (agent
+                        // shutdown) so an in-flight upload is never declared complete.
+                        if (!Thread.currentThread().isInterrupted()
+                                && remaining.decrementAndGet() == 0
+                                && streamUploadSettings.enabled()) {
+                            signalSessionComplete(publisher, sid);
+                        }
+                    } finally {
+                        activeTailers.decrementAndGet();
                     }
                 });
             }
@@ -188,8 +206,60 @@ public class Main {
             try { publisher.close(); } catch (Exception ignored) {}
         }));
 
-        // Block main thread until SIGTERM/Ctrl+C triggers the shutdown hook.
+        if (exitWhenDrained) {
+            awaitDrainThenExit(watchedFolders.keySet(), startedSessions, activeTailers);
+            System.out.println("[agent] all sessions drained - exiting");
+            executor.shutdownNow();
+            try { publisher.close(); } catch (Exception ignored) {}
+            return;
+        }
+
+        // Daemon mode: block main thread until SIGTERM/Ctrl+C triggers the shutdown hook.
         new CountDownLatch(1).await();
+    }
+
+    /**
+     * Block until every discovered session has fully drained (no live tailers) and no
+     * session is still being written (no {@code .tmp/} dir), after at least one session
+     * was seen. Lets the launcher-driven one-shot {@code gpufl trace} upload wait for a
+     * clean finish instead of hard-killing the agent mid-upload. Two consecutive clean
+     * checks guard against a session discovered between ticks.
+     */
+    private static void awaitDrainThenExit(Collection<File> folders,
+                                           Set<String> startedSessions,
+                                           java.util.concurrent.atomic.AtomicInteger activeTailers)
+            throws InterruptedException {
+        int clean = 0;
+        while (true) {
+            Thread.sleep(1000);
+            boolean drained = !startedSessions.isEmpty()
+                    && activeTailers.get() == 0
+                    && !anyActiveSession(folders);
+            clean = drained ? clean + 1 : 0;
+            if (clean >= 2) return;
+        }
+    }
+
+    /** True if any session subdir under {@code folders} still has a {@code .tmp/} working
+     *  dir - i.e., a run is still writing it (the client removes .tmp once every channel
+     *  closes). Guards exit-when-drained against a run that hasn't finished yet. */
+    static boolean anyActiveSession(Collection<File> folders) {
+        for (File folder : folders) {
+            File[] subdirs = folder.listFiles(File::isDirectory);
+            if (subdirs == null) continue;
+            for (File subdir : subdirs) {
+                if (subdir.getName().startsWith(".")) continue;
+                if (new File(subdir, ".tmp").isDirectory()) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether the launcher asked the agent to exit once its session(s) drain
+     *  (GPUFL_AGENT_EXIT_WHEN_DRAINED / --exit-when-drained). */
+    static boolean parseExitWhenDrained(String[] args, Map<String, String> env) {
+        String v = resolve(args, "exit-when-drained", "GPUFL_AGENT_EXIT_WHEN_DRAINED", null, env);
+        return v != null && !v.equalsIgnoreCase("false") && !v.equals("0");
     }
 
     /**
