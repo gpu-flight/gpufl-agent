@@ -6,7 +6,9 @@ plugins {
 }
 
 group = 'com.gpuflight'
-version = '1.0-SNAPSHOT'
+// Release CI passes -PagentVersion=<tag> so the JAR carries the real version;
+// local builds fall back to the SNAPSHOT.
+version = findProperty('agentVersion') ?: '1.0-SNAPSHOT'
 
 repositories {
     mavenCentral()

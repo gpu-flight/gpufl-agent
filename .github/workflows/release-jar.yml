@@ -1,0 +1,51 @@
+name: Release agent JAR
+
+# On a v* tag, build the shadow (fat) JAR and publish it as a downloadable
+# GitHub Release asset named gpufl-agent.jar. Users grab it from the releases
+# page or the stable URL:
+#   https://github.com/gpu-flight/gpufl-agent/releases/latest/download/gpufl-agent.jar
+# and run it with `java -jar gpufl-agent.jar`. Runs alongside publish-image.yml,
+# which ships the same JAR as a ghcr image for the monitor container.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # create the release + upload the asset
+
+jobs:
+  release-jar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Resolve version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build fat JAR
+        run: |
+          chmod +x ./gradlew
+          ./gradlew shadowJar --no-daemon -PagentVersion="${{ steps.ver.outputs.version }}"
+
+      - name: Stage release asset
+        run: |
+          mkdir -p release
+          cp build/libs/*-all.jar release/gpufl-agent.jar
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/gpufl-agent.jar \
+            --title "gpufl-agent ${{ steps.ver.outputs.version }}" \
+            --generate-notes \
+          || gh release upload "$GITHUB_REF_NAME" release/gpufl-agent.jar --clobber
