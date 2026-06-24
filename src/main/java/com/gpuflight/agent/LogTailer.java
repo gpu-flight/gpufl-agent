@@ -6,7 +6,7 @@ import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.filter.DeviceMetricDeduplicator;
 import com.gpuflight.agent.model.LogWrapper;
 import com.gpuflight.agent.publisher.Publisher;
-
+import com.gpuflight.agent.util.Delays;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -236,21 +236,21 @@ public class LogTailer {
                 } else {
                     // Publish failed mid-window; the cursor already holds the resume offset.
                     offset = resume;
-                    sleep(5000);
+                    if (!Delays.sleep(Delays.LOG_TAILER_RETRY)) break;
                 }
                 continue;
             }
 
             // Window <idx> not published yet. Is the session still writing?
             if (sessionTmpDir().exists()) {
-                sleep(2000);
+                if (!Delays.sleep(Delays.LOG_TAILER_POLL)) break;
                 continue;
             }
 
             // .tmp/ gone -> the client closed every channel. Each channel's last
             // window is published BEFORE .tmp/ is removed, so wait a moment then do
             // one final check for a straggler before finishing.
-            sleep(4500);
+            if (!Delays.sleep(Delays.SESSION_END_GRACE_PERIOD)) break;
             if (resolveRotated(idx) != null) continue;
             System.out.println("[" + logType + "] Session finished (.tmp gone, no window "
                     + idx + "; last sent " + (idx - 1) + ").");
@@ -478,13 +478,5 @@ public class LogTailer {
             remaining -= r;
         }
         return total;
-    }
-
-    private static void sleep(long ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
     }
 }
