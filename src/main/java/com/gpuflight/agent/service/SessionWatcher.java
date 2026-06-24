@@ -2,7 +2,7 @@ package com.gpuflight.agent.service;
 
 import com.gpuflight.agent.config.ConfigLoader;
 import com.gpuflight.agent.model.DiscoveredSession;
-
+import com.gpuflight.agent.util.Delays;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -43,10 +43,7 @@ public class SessionWatcher {
                     for (DiscoveredSession s : discoverSources(folder, logTypes)) {
                         onSessionDiscovered.accept(s);
                     }
-                    Thread.sleep(2_000);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
+                    if (!Delays.sleep(Delays.SESSION_WATCHER_POLL)) break;
                 } catch (Exception e) {
                     System.err.println("[watcher] error scanning " +
                             folder + ": " + e.getMessage());

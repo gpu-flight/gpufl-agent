@@ -6,10 +6,12 @@ import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.filter.DeviceMetricDeduplicator;
 import com.gpuflight.agent.model.DiscoveredSession;
 import com.gpuflight.agent.publisher.Publisher;
+import com.gpuflight.agent.util.Delays;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
@@ -77,24 +79,25 @@ public class TailerManager {
     }
 
     private void signalSessionComplete(Publisher publisher, String sessionId) {
+        long delayMs = Delays.SESSION_COMPLETE_RETRY.toMillis();
         for (int attempt = 1; attempt <= 3; attempt++) {
             try {
                 if (publisher.publishSessionComplete(sessionId)) return;
             } catch (Exception e) {
-                System.err.println("[agent] session-complete signal error for "
-                        + sessionId + ": " + e.getMessage());
+                log.error("session-complete signal error for {}: {}", sessionId, e.getMessage());
             }
-            try {
-                Thread.sleep(2000L);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return;
-            }
+            if (!Delays.sleep(Duration.ofMillis(delayMs))) return;
+            delayMs *= 2; // Exponential backoff
         }
         log.warn("session-complete signal gave up for {} - backend grace finalize will apply", sessionId);
     }
 
     public AtomicInteger getActiveTailers() {
         return activeTailers;
+    }
+
+    /** True once any session has been discovered and tailed. Cumulative - never cleared. */
+    public boolean hasStartedAnySession() {
+        return !startedSessions.isEmpty();
     }
 }

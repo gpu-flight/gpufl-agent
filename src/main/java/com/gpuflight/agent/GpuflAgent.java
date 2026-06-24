@@ -12,6 +12,7 @@ import com.gpuflight.agent.publisher.Publisher;
 import com.gpuflight.agent.publisher.PublisherFactory;
 import com.gpuflight.agent.service.SessionWatcher;
 import com.gpuflight.agent.service.TailerManager;
+import com.gpuflight.agent.util.Delays;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,7 +26,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public class GpuflAgent {
 
@@ -114,7 +114,7 @@ public class GpuflAgent {
 
         if (exitWhenDrained) {
             log.info("exit-when-drained mode enabled");
-            awaitDrainThenExit(watchedFolders.keySet(), tailerManager.getActiveTailers());
+            awaitDrainThenExit(watchedFolders.keySet(), tailerManager);
             log.info("all sessions drained - exiting");
             shutdown();
             return;
@@ -154,16 +154,16 @@ public class GpuflAgent {
         try { if (publisher != null) publisher.close(); } catch (Exception ignored) {}
     }
 
-    void awaitDrainThenExit(Collection<File> folders, AtomicInteger activeTailers)
-            throws InterruptedException {
-        boolean sawActive = false;
+    void awaitDrainThenExit(Collection<File> folders, TailerManager tailers) {
         int clean = 0;
         while (true) {
-            Thread.sleep(1000);
-            boolean activeNow = anyActiveSession(folders);
-            if (activeNow) sawActive = true;
-            boolean drained = sawActive && activeTailers.get() == 0 && !activeNow;
-            clean = drained ? clean + 1 : 0;
+            if (!Delays.sleep(Delays.DRAIN_CHECK_POLL)) break;
+            // Gate on "a session was discovered" (cumulative), not on observing the live
+            // .tmp/ marker: a short trace finalizes that marker between our 1s polls, which
+            // left the old sawActive gate spinning forever even after the upload drained.
+            boolean started = tailers.hasStartedAnySession();
+            boolean idle = tailers.getActiveTailers().get() == 0 && !anyActiveSession(folders);
+            clean = (started && idle) ? clean + 1 : 0;
             if (clean >= 2) return;
         }
     }
