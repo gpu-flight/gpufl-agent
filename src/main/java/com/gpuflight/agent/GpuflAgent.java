@@ -17,6 +17,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -26,6 +27,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.function.Consumer;
 
 public class GpuflAgent {
 
@@ -51,6 +53,14 @@ public class GpuflAgent {
         log.info("Publisher: {}", config.publisher().getClass().getSimpleName());
 
         boolean exitWhenDrained = ConfigLoader.parseExitWhenDrained(args, env);
+        boolean exitIfEmpty = ConfigLoader.parseExitIfEmpty(args, env);
+        // A launcher-spawned --upload agent uploads only THIS run's sessions. The JVM
+        // start time predates the target's session (the launcher spawns the agent
+        // before it forks the target), so any session dir older than it is from an
+        // earlier run. 0 = standalone agent: no cutoff, upload everything.
+        long sinceMs = ConfigLoader.parseIgnorePreexisting(args, env)
+                ? ManagementFactory.getRuntimeMXBean().getStartTime()
+                : 0L;
 
         resolveWatchedFolders();
 
@@ -78,18 +88,27 @@ public class GpuflAgent {
 
         tailerManager = new TailerManager(executor, publisher, cursorMgr, consumedFilesQueue,
                 deduplicator, streamUploadSettings, topicPrefix);
+        tailerManager.setPruneFailed(ConfigLoader.parsePruneFailed(args, env));
+
+        // A launcher-spawned --upload agent uploads only sessions newer than sinceMs
+        // (this run); a standalone agent (sinceMs == 0) uploads everything.
+        Consumer<DiscoveredSession> spawn = s -> {
+            if (sinceMs > 0 && new File(s.folder(), s.sessionId()).lastModified() < sinceMs) {
+                return; // belongs to an earlier run - not ours to upload
+            }
+            tailerManager.spawnSessionTailers(s);
+        };
 
         // Initial discovery + spawn
         for (var entry : watchedFolders.entrySet()) {
             for (DiscoveredSession s : SessionWatcher.discoverSources(entry.getKey(), entry.getValue())) {
-                tailerManager.spawnSessionTailers(s);
+                spawn.accept(s);
             }
         }
 
         // Start watchers
         for (var entry : watchedFolders.entrySet()) {
-            new SessionWatcher(entry.getKey(), entry.getValue(), tailerManager::spawnSessionTailers)
-                    .start(executor);
+            new SessionWatcher(entry.getKey(), entry.getValue(), spawn).start(executor);
         }
 
         if (config.archiver() != null) {
@@ -113,8 +132,13 @@ public class GpuflAgent {
         Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown));
 
         if (exitWhenDrained) {
+            if (exitIfEmpty && !tailerManager.hasStartedAnySession()) {
+                log.info("nothing to upload - exiting");
+                shutdown();
+                return;
+            }
             log.info("exit-when-drained mode enabled");
-            awaitDrainThenExit(watchedFolders.keySet(), tailerManager);
+            awaitDrainThenExit(watchedFolders.keySet(), tailerManager, sinceMs);
             log.info("all sessions drained - exiting");
             shutdown();
             return;
@@ -154,7 +178,7 @@ public class GpuflAgent {
         try { if (publisher != null) publisher.close(); } catch (Exception ignored) {}
     }
 
-    void awaitDrainThenExit(Collection<File> folders, TailerManager tailers) {
+    void awaitDrainThenExit(Collection<File> folders, TailerManager tailers, long sinceMs) {
         int clean = 0;
         while (true) {
             if (!Delays.sleep(Delays.DRAIN_CHECK_POLL)) break;
@@ -162,19 +186,28 @@ public class GpuflAgent {
             // .tmp/ marker: a short trace finalizes that marker between our 1s polls, which
             // left the old sawActive gate spinning forever even after the upload drained.
             boolean started = tailers.hasStartedAnySession();
-            boolean idle = tailers.getActiveTailers().get() == 0 && !anyActiveSession(folders);
+            boolean idle = tailers.getActiveTailers().get() == 0 && !anyActiveSession(folders, sinceMs);
             clean = (started && idle) ? clean + 1 : 0;
             if (clean >= 2) return;
         }
     }
 
-    static boolean anyActiveSession(Collection<File> folders) {
+    static boolean anyActiveSession(Collection<File> folders, long sinceMs) {
         for (File folder : folders) {
             File[] subdirs = folder.listFiles(File::isDirectory);
             if (subdirs == null) continue;
             for (File subdir : subdirs) {
                 if (subdir.getName().startsWith(".")) continue;
-                if (new File(subdir, ".tmp").isDirectory()) return true;
+                // Under --upload scope, a session older than this run belongs to another
+                // run; its .tmp/ must not keep this run's agent from exiting.
+                if (sinceMs > 0 && subdir.lastModified() < sinceMs) continue;
+                File tmp = new File(subdir, ".tmp");
+                if (!tmp.isDirectory()) continue;
+                // A frozen .tmp/ (crashed/killed client) is not active - the same stale
+                // grace the tailer uses, so an orphaned .tmp/ can't block the drain.
+                if (System.currentTimeMillis() - LogTailer.newestMtime(tmp)
+                        > Delays.STALE_TMP_GRACE.toMillis()) continue;
+                return true;
             }
         }
         return false;
