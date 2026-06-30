@@ -149,6 +149,28 @@ public class ConfigLoader {
         return v != null && !v.equalsIgnoreCase("false") && !v.equals("0");
     }
 
+    /**
+     * Scope a launcher-spawned {@code --upload} agent to THIS run: ignore every
+     * session that already exists when the agent starts, uploading only sessions
+     * that appear afterwards. A standalone agent (no flag) keeps scanning all
+     * sessions so "watch a parent, run many times" still works.
+     */
+    public static boolean parseIgnorePreexisting(String[] args, Map<String, String> env) {
+        String v = resolve(args, "ignore-preexisting", "GPUFL_AGENT_IGNORE_PREEXISTING", null, env);
+        return v != null && !v.equalsIgnoreCase("false") && !v.equals("0");
+    }
+
+    /**
+     * Delete a session finished off an orphaned {@code .tmp/} (producer crashed or
+     * was killed) instead of leaving a {@code .failed} marker - its windows are
+     * already uploaded, so the local dir is just leftover. Off by default (keep the
+     * marker so the failure can be inspected).
+     */
+    public static boolean parsePruneFailed(String[] args, Map<String, String> env) {
+        String v = resolve(args, "prune-failed", "GPUFL_AGENT_PRUNE_FAILED", null, env);
+        return v != null && !v.equalsIgnoreCase("false") && !v.equals("0");
+    }
+
     public static String buildArchiveKey(String prefix, Path path) {
         return prefix + path.toFile().getName();
     }

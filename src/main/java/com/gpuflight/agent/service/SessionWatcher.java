@@ -23,6 +23,16 @@ public class SessionWatcher {
     private static final Pattern CHANNEL_FILE_PATTERN =
             Pattern.compile("^(device|scope|system|sass)(?:\\.\\d+)?\\.log(?:\\.gz)?$");
 
+    /** Marker file the agent drops in a session dir once every channel has been
+     *  fully uploaded. Discovery skips a session that has it, so a re-scan never
+     *  re-tails or re-signals an already-finished session. */
+    public static final String UPLOADED_MARKER = ".uploaded";
+
+    /** Marker for a session that finished off an orphaned {@code .tmp/} (producer
+     *  crashed or was killed and never removed it). Discovery skips it like
+     *  UPLOADED_MARKER; an agent with pruning on deletes such a session instead. */
+    public static final String FAILED_MARKER = ".failed";
+
     private static final Set<String> warnedLegacyFolders =
             ConcurrentHashMap.newKeySet();
 
@@ -84,19 +94,48 @@ public class SessionWatcher {
 
         for (File subdir : subdirs) {
             if (subdir.getName().startsWith(".")) continue;
-            File[] inside = subdir.listFiles();
-            if (inside == null) continue;
-            boolean looksLikeSession = false;
-            for (File child : inside) {
-                if (child.isFile() &&
-                        CHANNEL_FILE_PATTERN.matcher(child.getName()).matches()) {
-                    looksLikeSession = true;
-                    break;
+            if (looksLikeSession(subdir)) {
+                // Flat: <folder>/<session_id>/ - embedded gpufl and single-pass
+                // `gpufl trace` write the session directly under the watched dir.
+                if (!isSettled(subdir)) {
+                    result.add(new DiscoveredSession(folder, subdir.getName(), types));
+                }
+                continue;
+            }
+            // One grouping level: <folder>/<group>/<session_id>/ - a multi-pass
+            // run nests its passes under a "run-<app>-<analysis_id>" folder. Descend
+            // one level (and no further) so each pass session is still discovered.
+            File[] grandchildren = subdir.listFiles(File::isDirectory);
+            if (grandchildren == null) continue;
+            Arrays.sort(grandchildren, Comparator.comparing(File::getName));
+            for (File leaf : grandchildren) {
+                if (leaf.getName().startsWith(".")) continue;
+                if (looksLikeSession(leaf) && !isSettled(leaf)) {
+                    result.add(new DiscoveredSession(subdir, leaf.getName(), types));
                 }
             }
-            if (!looksLikeSession) continue;
-            result.add(new DiscoveredSession(folder, subdir.getName(), types));
         }
         return result;
+    }
+
+    // A settled session (fully uploaded, or finished+marked failed) is skipped by a
+    // re-scan so it is never re-tailed or re-signalled.
+    private static boolean isSettled(File sessionDir) {
+        return new File(sessionDir, UPLOADED_MARKER).exists()
+                || new File(sessionDir, FAILED_MARKER).exists();
+    }
+
+    // A directory is a session if it directly contains a channel log file
+    // (device/scope/system/sass[.N].log[.gz]).
+    private static boolean looksLikeSession(File dir) {
+        File[] inside = dir.listFiles();
+        if (inside == null) return false;
+        for (File child : inside) {
+            if (child.isFile() &&
+                    CHANNEL_FILE_PATTERN.matcher(child.getName()).matches()) {
+                return true;
+            }
+        }
+        return false;
     }
 }

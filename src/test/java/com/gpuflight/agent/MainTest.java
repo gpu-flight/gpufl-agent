@@ -481,7 +481,7 @@ class MainTest {
     void anyActiveSession_trueWhenSessionStillWriting(@TempDir Path dir) throws IOException {
         File folder = dir.toFile();
         Files.createDirectories(new File(new File(folder, "sess-1"), ".tmp").toPath()); // .tmp = active
-        assertTrue(GpuflAgent.anyActiveSession(List.of(folder)));
+        assertTrue(GpuflAgent.anyActiveSession(List.of(folder), 0L));
     }
 
     @Test
@@ -490,8 +490,31 @@ class MainTest {
         File session = new File(folder, "sess-1");
         Files.createDirectories(session.toPath());
         Files.writeString(new File(session, "device.1.log.gz").toPath(), "x"); // finished window, no .tmp
-        assertFalse(GpuflAgent.anyActiveSession(List.of(folder)));
-        assertFalse(GpuflAgent.anyActiveSession(List.of(new File(folder, "missing")))); // non-existent folder
+        assertFalse(GpuflAgent.anyActiveSession(List.of(folder), 0L));
+        assertFalse(GpuflAgent.anyActiveSession(List.of(new File(folder, "missing")), 0L)); // non-existent folder
+    }
+
+    @Test
+    void anyActiveSession_ignoresSessionsOlderThanCutoff(@TempDir Path dir) throws IOException {
+        File folder = dir.toFile();
+        File active = new File(folder, "sess-1");
+        Files.createDirectories(new File(active, ".tmp").toPath()); // .tmp = active session
+        // Backdate it below the cutoff: a --upload agent (sinceMs > 0) treats it as an
+        // earlier run's session and must not let its .tmp/ block this run's exit.
+        long cutoff = System.currentTimeMillis();
+        active.setLastModified(cutoff - 60_000L);
+        assertFalse(GpuflAgent.anyActiveSession(List.of(folder), cutoff));
+        assertTrue(GpuflAgent.anyActiveSession(List.of(folder), 0L)); // no cutoff -> still active
+    }
+
+    @Test
+    void anyActiveSession_falseWhenTmpIsStale(@TempDir Path dir) throws IOException {
+        File folder = dir.toFile();
+        File tmp = new File(new File(folder, "sess-1"), ".tmp");
+        Files.createDirectories(tmp.toPath());
+        // An orphaned .tmp/ frozen well past the stale grace must not read as active.
+        tmp.setLastModified(System.currentTimeMillis() - 120_000L); // 120s >> 30s grace
+        assertFalse(GpuflAgent.anyActiveSession(List.of(folder), 0L));
     }
 
     // ---- printUsage() — smoke test ----

@@ -215,7 +215,7 @@ public class LogTailer {
      * dir is gone - the client removes it once every channel has closed - and no
      * further window has appeared. No partial-file tailing, no rotation-shift guess.
      */
-    public void tail(Publisher publisher) {
+    public boolean tail(Publisher publisher) {
         var cursor = cursorMgr.get(streamKey);
         // fileIndex = window index in progress (1-based; 0 = none yet); offset =
         // bytes already sent within it (mid-window resume after a crash).
@@ -242,7 +242,18 @@ public class LogTailer {
             }
 
             // Window <idx> not published yet. Is the session still writing?
-            if (sessionTmpDir().exists()) {
+            File tmp = sessionTmpDir();
+            if (tmp.exists()) {
+                // A live client keeps appending to .tmp/ (system sampling alone
+                // advances its mtime); a client that crashed or was killed leaves
+                // .tmp/ frozen and never removed. Once it has sat unchanged past the
+                // grace, treat it as orphaned and finish - one dead session must not
+                // strand the agent's drain (and the 60s --upload cap) forever.
+                if (System.currentTimeMillis() - newestMtime(tmp) > Delays.STALE_TMP_GRACE.toMillis()) {
+                    System.out.println("[" + logType + "] Session finished (.tmp stale > "
+                            + Delays.STALE_TMP_GRACE.toSeconds() + "s - client gone; last sent " + (idx - 1) + ").");
+                    return true; // orphaned: producer never removed .tmp/
+                }
                 if (!Delays.sleep(Delays.LOG_TAILER_POLL)) break;
                 continue;
             }
@@ -254,8 +265,9 @@ public class LogTailer {
             if (resolveRotated(idx) != null) continue;
             System.out.println("[" + logType + "] Session finished (.tmp gone, no window "
                     + idx + "; last sent " + (idx - 1) + ").");
-            return;
+            return false; // clean: producer closed and removed .tmp/
         }
+        return false; // interrupted before finishing
     }
 
     /** The client's per-session working dir {@code <folder>/<sessionId>/.tmp}: active
@@ -263,6 +275,23 @@ public class LogTailer {
      *  closed, which is our "no more windows" signal. */
     private File sessionTmpDir() {
         return new File(sessionDir(), ".tmp");
+    }
+
+    /** Newest last-modified time of {@code dir} and its immediate entries. The
+     *  client appends to {@code .tmp/<channel>.log} while writing, so this advances
+     *  as long as the session is live and freezes once the client is gone.
+     *  Package-private so the drain-exit gate (GpuflAgent) shares the tailer's
+     *  staleness notion. */
+    static long newestMtime(File dir) {
+        long newest = dir.lastModified();
+        File[] kids = dir.listFiles();
+        if (kids != null) {
+            for (File k : kids) {
+                long m = k.lastModified();
+                if (m > newest) newest = m;
+            }
+        }
+        return newest;
     }
 
     /**

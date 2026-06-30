@@ -33,6 +33,16 @@ public final class Delays {
     public static final Duration SESSION_END_GRACE_PERIOD = Duration.ofMillis(4500);
 
     /**
+     * How long a session's {@code .tmp/} working dir may sit unchanged - no new
+     * window, no write - before the tailer treats it as ORPHANED (left behind by a
+     * client that crashed or was killed and never removed it) and finishes anyway.
+     * A live client keeps writing {@code .tmp/} - system sampling alone advances it
+     * well inside this window - so this only fires on genuinely dead sessions, and
+     * stops one of them from stranding the agent's drain forever.
+     */
+    public static final Duration STALE_TMP_GRACE = Duration.ofSeconds(30);
+
+    /**
      * Sleep for the specified duration.
      * @return true if the sleep finished normally, false if it was interrupted.
      */
