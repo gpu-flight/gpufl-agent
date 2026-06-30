@@ -53,6 +53,7 @@ public class GpuflAgent {
         log.info("Publisher: {}", config.publisher().getClass().getSimpleName());
 
         boolean exitWhenDrained = ConfigLoader.parseExitWhenDrained(args, env);
+        boolean exitIfEmpty = ConfigLoader.parseExitIfEmpty(args, env);
         // A launcher-spawned --upload agent uploads only THIS run's sessions. The JVM
         // start time predates the target's session (the launcher spawns the agent
         // before it forks the target), so any session dir older than it is from an
@@ -131,6 +132,11 @@ public class GpuflAgent {
         Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown));
 
         if (exitWhenDrained) {
+            if (exitIfEmpty && !tailerManager.hasStartedAnySession()) {
+                log.info("nothing to upload - exiting");
+                shutdown();
+                return;
+            }
             log.info("exit-when-drained mode enabled");
             awaitDrainThenExit(watchedFolders.keySet(), tailerManager, sinceMs);
             log.info("all sessions drained - exiting");
