@@ -8,7 +8,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -108,6 +110,43 @@ class HttpPublisherTest {
         Thread.sleep(300);
 
         assertEquals("Bearer gpfl_tok123", lastAuthHeader.get());
+    }
+
+    @Test
+    void publishStream_trimsTransportWhitespaceFromAuthorizationToken() {
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", " \tgpfl_tok123\r\n", 5,
+                "stream", 100, 1_000_000L);
+        HttpPublisher pub = new HttpPublisher(config);
+
+        boolean ok = pub.publishStream("session-1",
+            List.of("{\"type\":\"kernel_event\",\"session_id\":\"session-1\"}"));
+
+        assertTrue(ok);
+        assertEquals("Bearer gpfl_tok123", lastAuthHeader.get());
+    }
+
+    @Test
+    void publishStream_malformedAuthorizationNeverLeaksTokenInLogs() throws IOException {
+        String secret = "gpfl_secret\rleak";
+        HttpConfig config = new HttpConfig(hostUrl(), "v1", secret, 5,
+                "stream", 100, 1_000_000L);
+        HttpPublisher pub = new HttpPublisher(config);
+        PrintStream originalOut = System.out;
+        var captured = new ByteArrayOutputStream();
+        boolean ok;
+        try {
+            System.setOut(new PrintStream(captured, true, StandardCharsets.UTF_8));
+            ok = pub.publishStreamGz("session-1",
+                gzipBytes("{\"type\":\"kernel_event\"}\n"));
+        } finally {
+            System.setOut(originalOut);
+        }
+
+        String output = captured.toString(StandardCharsets.UTF_8);
+        assertFalse(ok);
+        assertTrue(output.contains("IllegalArgumentException"));
+        assertFalse(output.contains(secret));
+        assertFalse(output.contains("Bearer gpfl_secret"));
     }
 
     @Test

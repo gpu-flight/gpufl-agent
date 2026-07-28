@@ -71,7 +71,7 @@ public class HttpPublisher implements Publisher {
             Thread.currentThread().interrupt();
             return false;
         } catch (Exception e) {
-            System.out.println("HTTP Connection error: " + e);
+            logConnectionError("HTTP event", e);
             return false;
         }
     }
@@ -88,7 +88,7 @@ public class HttpPublisher implements Publisher {
                 + " session=" + sessionId + " lines=" + ndjsonLines.size() + " gzipBytes=" + body.length);
             return postGzStream(sessionId, body);
         } catch (Exception e) {
-            System.out.println("HTTP stream connection error: " + e);
+            logConnectionError("HTTP stream", e);
             return false;
         }
     }
@@ -149,7 +149,7 @@ public class HttpPublisher implements Publisher {
             Thread.currentThread().interrupt();
             return false;
         } catch (Exception e) {
-            System.out.println("HTTP stream connection error: " + e);
+            logConnectionError("HTTP stream", e);
             return false;
         }
     }
@@ -188,15 +188,28 @@ public class HttpPublisher implements Publisher {
             Thread.currentThread().interrupt();
             return false;
         } catch (Exception e) {
-            System.out.println("HTTP session-complete connection error: " + e);
+            logConnectionError("HTTP session-complete", e);
             return false;
         }
     }
 
     private void addAuthHeader(HttpRequest.Builder requestBuilder) {
         if (config.authToken() != null && !config.authToken().isBlank()) {
-            requestBuilder.header("Authorization", "Bearer " + config.authToken());
+            // Environment/config-file values can acquire surrounding CR/LF or
+            // whitespace while crossing shells. API keys never contain them,
+            // and passing them through makes HttpClient reject the header.
+            requestBuilder.header("Authorization", "Bearer " + config.authToken().trim());
         }
+    }
+
+    private static void logConnectionError(String operation, Exception error) {
+        // HttpClient's IllegalArgumentException includes the rejected header
+        // value. Printing the exception/message here can therefore disclose a
+        // complete Authorization bearer token. The exception type is enough
+        // to distinguish malformed requests from transport failures without
+        // putting credentials in logs.
+        System.out.println(operation + " connection error ("
+            + error.getClass().getSimpleName() + ")");
     }
 
     private static byte[] gzip(byte[] content) throws Exception {
