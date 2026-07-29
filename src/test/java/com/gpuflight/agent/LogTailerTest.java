@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -58,6 +59,16 @@ class LogTailerTest {
             return publishStreamGz(sessionId, gzBody);
         }
         @Override public void close() {}
+    }
+
+    static class FailingStreamPublisher extends CapturingStreamPublisher {
+        final CountDownLatch attempted = new CountDownLatch(1);
+
+        @Override public boolean publishStreamGz(
+                String sessionId, WindowMetadata window, byte[] gzBody) {
+            attempted.countDown();
+            return false;
+        }
     }
 
     private static void gzip(Path src, Path dest) throws IOException {
@@ -147,6 +158,51 @@ class LogTailerTest {
         thread.join(2000);
 
         assertEquals(payload, requeued);
+    }
+
+    @Test
+    void outageThenAgentRestartRetainsAndRetriesTheSameWindow(
+            @TempDir Path dir) throws Exception {
+        Path payload = gzWindow(
+                dir, "app", "device", 1,
+                "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n");
+        WindowMetadata expected =
+                metadata(dir, "app", "device", 1, payload);
+        Path cursorFile = dir.resolve("cursor.json");
+        var firstCursors = new CursorManager(cursorFile.toFile());
+        var outage = new FailingStreamPublisher();
+        var first = startTailer(
+                streamTailer(dir, "app", "device", firstCursors), outage);
+
+        assertTrue(outage.attempted.await(2, TimeUnit.SECONDS));
+        first.interrupt();
+        first.join(2000);
+
+        assertEquals(0, new CursorManager(cursorFile.toFile())
+                .get("app.device").fileIndex());
+        assertTrue(Files.exists(payload),
+                "an unacknowledged window must survive agent shutdown");
+
+        var recovered = new CapturingStreamPublisher();
+        var second = startTailer(
+                streamTailer(
+                    dir, "app", "device",
+                    new CursorManager(cursorFile.toFile())),
+                recovered);
+        awaitEvents(recovered.windows, 1, 3000);
+        long deadline = System.currentTimeMillis() + 2000;
+        while (new CursorManager(cursorFile.toFile())
+                    .get("app.device").fileIndex() < 2
+                && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        second.interrupt();
+        second.join(2000);
+
+        assertEquals(1, recovered.windows.size());
+        assertEquals(expected.windowId(), recovered.windows.get(0).windowId());
+        assertEquals(2, new CursorManager(cursorFile.toFile())
+                .get("app.device").fileIndex());
     }
 
     @Test
@@ -381,17 +437,22 @@ class LogTailerTest {
         metadata(dir, "app", "device", 1, gz);
         Files.write(gz, new byte[] {1, 2, 3, 4});
 
+        var cursors = new CursorManager(dir.resolve("cursor.json").toFile());
         var publisher = new CapturingStreamPublisher();
         var thread = startTailer(
                 streamTailer(dir, "app", "device",
-                    new CursorManager(dir.resolve("cursor.json").toFile())),
+                    cursors),
                 publisher);
-        Thread.sleep(300);
-        thread.interrupt();
         thread.join(2000);
 
+        assertFalse(thread.isAlive(),
+                "immutable checksum mismatch must not retry forever");
         assertTrue(publisher.batches.isEmpty());
         assertTrue(publisher.windows.isEmpty());
+        assertTrue(SessionOwnership.hasAgentWindowFailure(
+                dir.resolve("app"), "device", 1));
+        assertEquals(0, cursors.get("app.device").fileIndex(),
+                "terminal failure must not advance the upload cursor");
     }
 
     @Test
@@ -414,5 +475,71 @@ class LogTailerTest {
         assertTrue(publisher.batches.isEmpty(),
                 "a lock-aware session must wait for identity metadata");
         assertTrue(publisher.windows.isEmpty());
+    }
+
+    @Test
+    void mismatchedMetadataMarksTheSessionFailedWithoutUploading(
+            @TempDir Path dir) throws Exception {
+        Path gz = gzWindow(dir, "app", "device", 1,
+                "{\"type\":\"kernel_event\",\"session_id\":\"app\"}\n");
+        WindowMetadata wrong = new WindowMetadata(
+                1, "transport_window",
+                "11111111-2222-4333-8444-555555555555",
+                "another-session", "device", 1, 10, 20, 30,
+                gz.getFileName().toString(), Files.size(gz), 0);
+        Files.writeString(
+                dir.resolve("app/.gpufl-window.device.1.json"),
+                com.gpuflight.agent.config.JsonSettings.MAPPER
+                    .writeValueAsString(wrong));
+
+        var publisher = new CapturingStreamPublisher();
+        var thread = startTailer(
+                streamTailer(dir, "app", "device",
+                    new CursorManager(dir.resolve("cursor.json").toFile())),
+                publisher);
+        thread.join(2000);
+
+        assertFalse(thread.isAlive());
+        assertTrue(publisher.windows.isEmpty());
+        assertTrue(SessionOwnership.hasAgentWindowFailure(
+                dir.resolve("app"), "device", 1));
+        assertTrue(Files.exists(gz), "forensic payload must be retained");
+    }
+
+    @Test
+    void malformedMetadataMarksTheSessionFailedWithoutUploading(
+            @TempDir Path dir) throws Exception {
+        Path gz = gzWindow(dir, "app", "device", 1,
+                "{\"type\":\"kernel_event\",\"session_id\":\"app\"}\n");
+        Files.writeString(
+                dir.resolve("app/.gpufl-window.device.1.json"),
+                "{not-json");
+
+        var publisher = new CapturingStreamPublisher();
+        var thread = startTailer(
+                streamTailer(dir, "app", "device",
+                    new CursorManager(dir.resolve("cursor.json").toFile())),
+                publisher);
+        thread.join(2000);
+
+        assertFalse(thread.isAlive());
+        assertTrue(publisher.windows.isEmpty());
+        assertTrue(SessionOwnership.hasAgentWindowFailure(
+                dir.resolve("app"), "device", 1));
+        assertTrue(Files.exists(gz));
+    }
+
+    @Test
+    void durableWindowFailureStopsRetryingAfterAgentRestart(
+            @TempDir Path dir) throws Exception {
+        Path session = dir.resolve("app");
+        Files.createDirectories(session);
+        assertTrue(SessionOwnership.recordAgentWindowFailure(
+                session, "device", 1, "payload_checksum_mismatch"));
+        var tailer = streamTailer(
+                dir, "app", "device",
+                new CursorManager(dir.resolve("cursor.json").toFile()));
+
+        assertTrue(tailer.tail(new CapturingStreamPublisher()));
     }
 }

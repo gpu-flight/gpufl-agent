@@ -1,9 +1,12 @@
 package com.gpuflight.agent;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -58,5 +61,59 @@ public final class SessionOwnership {
             // Completion through an unreadable directory is unsafe.
             return true;
         }
+    }
+
+    public static Path agentWindowFailureMarker(
+            Path sessionDir, String channel, int sequence) {
+        String safeChannel = channel == null
+                ? "unknown"
+                : channel.replaceAll("[^A-Za-z0-9_-]", "_");
+        return sessionDir.resolve(
+                LOSS_PREFIX + "agent-" + safeChannel + "." + sequence + ".json");
+    }
+
+    public static boolean hasAgentWindowFailure(
+            Path sessionDir, String channel, int sequence) {
+        return Files.isRegularFile(
+                agentWindowFailureMarker(sessionDir, channel, sequence));
+    }
+
+    /**
+     * Persist a terminal local identity failure. The payload and sidecar stay
+     * in place for forensic inspection; the shared loss prefix prevents the
+     * session from being reported complete.
+     */
+    public static boolean recordAgentWindowFailure(
+            Path sessionDir, String channel, int sequence, String reason) {
+        Path marker = agentWindowFailureMarker(sessionDir, channel, sequence);
+        if (Files.isRegularFile(marker)) return true;
+        String json = "{\"schema_version\":1,"
+                + "\"source\":\"gpufl-agent\","
+                + "\"channel\":\"" + jsonEscape(channel) + "\","
+                + "\"window_sequence\":" + sequence + ","
+                + "\"reason\":\"" + jsonEscape(reason) + "\"}\n";
+        try {
+            Files.createDirectories(sessionDir);
+            try (FileChannel out = FileChannel.open(
+                    marker, StandardOpenOption.CREATE_NEW,
+                    StandardOpenOption.WRITE)) {
+                ByteBuffer bytes = StandardCharsets.UTF_8.encode(json);
+                while (bytes.hasRemaining()) out.write(bytes);
+                out.force(true);
+            }
+            return true;
+        } catch (FileAlreadyExistsException alreadyRecorded) {
+            return Files.isRegularFile(marker);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static String jsonEscape(String value) {
+        if (value == null) return "";
+        return value.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n");
     }
 }

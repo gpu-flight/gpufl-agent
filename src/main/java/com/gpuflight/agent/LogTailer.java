@@ -1,5 +1,6 @@
 package com.gpuflight.agent;
 
+import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 import com.gpuflight.agent.config.JsonSettings;
 import com.gpuflight.agent.config.StreamUploadSettings;
@@ -53,6 +54,8 @@ public class LogTailer {
 
     /** Bytes of uncompressed head used for the content signature. */
     private static final int HEAD_SIG_BYTES = 512;
+    private static final long PERMANENT_WINDOW_FAILURE = Long.MIN_VALUE;
+    private String permanentWindowFailureReason;
 
     public LogTailer(File folder, String sessionId, String logType, String topicPrefix,
                      CursorManager cursorMgr, BlockingQueue<Path> consumedFilesQueue) {
@@ -121,12 +124,18 @@ public class LogTailer {
                 "identity metadata not visible yet for current-client payload "
                     + window.getName());
         }
-        WindowMetadata metadata =
-            JsonSettings.MAPPER.readValue(metadataPath.toFile(),
-                                          WindowMetadata.class);
+        WindowMetadata metadata;
+        try {
+            metadata = JsonSettings.MAPPER.readValue(
+                    metadataPath.toFile(), WindowMetadata.class);
+        } catch (JacksonException malformed) {
+            throw new PermanentWindowException(
+                    "window identity metadata is malformed for "
+                            + window.getName());
+        }
         if (!metadata.isValidFor(
                 sessionId, logType, index, window.getName())) {
-            throw new IOException(
+            throw new PermanentWindowException(
                 "window metadata does not match payload " + window.getName());
         }
         return metadata;
@@ -281,6 +290,13 @@ public class LogTailer {
         // bytes already sent within it (mid-window resume after a crash).
         int idx = Math.max(1, cursor.fileIndex());
         long offset = cursor.fileIndex() >= 1 ? cursor.offset() : 0L;
+        if (SessionOwnership.hasAgentWindowFailure(
+                sessionDir().toPath(), logType, idx)) {
+            System.err.println("[" + logType + "] prior permanent transport "
+                    + "window failure is still present; refusing "
+                    + "session-complete");
+            return true;
+        }
         enqueuePreviouslyAcknowledgedWindows(idx);
         System.out.println("[" + logType + "] Starting (window mode) - window index=" + idx + ", offset=" + offset);
 
@@ -288,7 +304,24 @@ public class LogTailer {
             File window = resolveRotated(idx);
             if (window != null) {
                 long resume = drainWindow(window, offset, publisher, idx);
-                if (resume < 0) {
+                if (resume == PERMANENT_WINDOW_FAILURE) {
+                    String reason = permanentWindowFailureReason == null
+                            ? "immutable_window_contract_violation"
+                            : permanentWindowFailureReason;
+                    boolean marked =
+                            SessionOwnership.recordAgentWindowFailure(
+                                    sessionDir().toPath(), logType, idx, reason);
+                    System.err.println("[" + logType + "] permanent transport "
+                            + "window failure at " + window.getName() + ": "
+                            + reason + ". Payload retained; session-complete "
+                            + "will not be emitted."
+                            + (marked ? ""
+                                : " WARNING: durable loss marker write failed."));
+                    if (marked) return true;
+                    // Never fall through to session-complete without a
+                    // durable indication that this profile is incomplete.
+                    if (!Delays.sleep(Delays.LOG_TAILER_RETRY)) break;
+                } else if (resume < 0) {
                     System.out.println("[" + logType + "] Sent window " + window.getName() + ".");
                     if (consumedFilesQueue != null) consumedFilesQueue.offer(window.toPath());
                     idx++;
@@ -400,10 +433,9 @@ public class LogTailer {
                 WindowMetadata metadata = metadataFor(window, idx);
                 byte[] gz = Files.readAllBytes(window.toPath());
                 if (!checksumMatches(metadata, gz)) {
-                    System.err.println("[" + logType + "] window checksum "
-                            + "mismatch - refusing upload: "
-                            + window.getName());
-                    return 0L;
+                    permanentWindowFailureReason =
+                            "payload_checksum_mismatch:" + window.getName();
+                    return PERMANENT_WINDOW_FAILURE;
                 }
                 if (publisher.publishStreamGz(sessionId, metadata, gz)) {
                     // Persist the window-done advance right after the durable 2xx so a crash
@@ -414,6 +446,9 @@ public class LogTailer {
                 }
                 System.out.println("[" + logType + "] window publish FAILED - retry in 5s");
                 return 0L;
+            } catch (PermanentWindowException e) {
+                permanentWindowFailureReason = e.getMessage();
+                return PERMANENT_WINDOW_FAILURE;
             } catch (IOException e) {
                 System.out.println("[" + logType + "] read error on " + window.getName() + ": " + e.getMessage());
                 return 0L;
@@ -602,5 +637,11 @@ public class LogTailer {
             remaining -= r;
         }
         return total;
+    }
+
+    private static final class PermanentWindowException extends IOException {
+        PermanentWindowException(String message) {
+            super(message);
+        }
     }
 }
