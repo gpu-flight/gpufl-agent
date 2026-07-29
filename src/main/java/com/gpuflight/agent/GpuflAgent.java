@@ -24,9 +24,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 public class GpuflAgent {
@@ -40,6 +42,8 @@ public class GpuflAgent {
     private ExecutorService executor;
     private Publisher publisher;
     private TailerManager tailerManager;
+    private BlockingQueue<Path> acknowledgedWindows;
+    private final AtomicInteger ackCleanupInFlight = new AtomicInteger();
     private final Map<File, List<String>> watchedFolders = new LinkedHashMap<>();
 
     public GpuflAgent(AgentConfig config, String[] args, Map<String, String> env) {
@@ -71,7 +75,7 @@ public class GpuflAgent {
 
         String cursorFile = ConfigLoader.resolve(args, "cursor-file", "GPUFL_CURSOR_FILE", "./cursor.json", env);
         var cursorMgr = new CursorManager(new File(cursorFile));
-        var consumedFilesQueue = new LinkedBlockingQueue<Path>();
+        acknowledgedWindows = new LinkedBlockingQueue<>();
 
         String topicPrefix = topicPrefix(config);
         StreamUploadSettings streamUploadSettings = switch (config.publisher()) {
@@ -86,7 +90,7 @@ public class GpuflAgent {
         executor = Executors.newVirtualThreadPerTaskExecutor();
         var deduplicator = new DeviceMetricDeduplicator();
 
-        tailerManager = new TailerManager(executor, publisher, cursorMgr, consumedFilesQueue,
+        tailerManager = new TailerManager(executor, publisher, cursorMgr, acknowledgedWindows,
                 deduplicator, streamUploadSettings, topicPrefix);
         tailerManager.setPruneFailed(ConfigLoader.parsePruneFailed(args, env));
 
@@ -111,23 +115,10 @@ public class GpuflAgent {
             new SessionWatcher(entry.getKey(), entry.getValue(), spawn).start(executor);
         }
 
-        if (config.archiver() != null) {
-            var archiver = new LogArchiver(config.archiver());
-            executor.submit(() -> {
-                while (!Thread.currentThread().isInterrupted()) {
-                    try {
-                        Path path = consumedFilesQueue.take();
-                        String objectKey = ConfigLoader.buildArchiveKey(config.archiver().prefix(), path);
-                        archiver.archive(path, objectKey);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    } catch (Exception e) {
-                        System.err.println("[archiver] Error: " + e.getMessage());
-                    }
-                }
-            });
-        }
+        LogArchiver archiver =
+                config.archiver() == null ? null : new LogArchiver(config.archiver());
+        executor.submit(() -> processAcknowledgedWindows(
+                archiver, streamUploadSettings.enabled()));
 
         Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown));
 
@@ -178,6 +169,36 @@ public class GpuflAgent {
         try { if (publisher != null) publisher.close(); } catch (Exception ignored) {}
     }
 
+    private void processAcknowledgedWindows(
+            LogArchiver archiver, boolean identityAckEnabled) {
+        while (!Thread.currentThread().isInterrupted()) {
+            Path path = null;
+            try {
+                path = acknowledgedWindows.take();
+                ackCleanupInFlight.incrementAndGet();
+                if (archiver != null) {
+                    String objectKey = ConfigLoader.buildArchiveKey(
+                            config.archiver().prefix(), path);
+                    archiver.archive(path, objectKey);
+                }
+                if (identityAckEnabled) {
+                    AcknowledgedWindowCleaner.deleteIfIdentityAware(path);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                // Preserve the payload. The persisted cursor lets the next
+                // agent start re-enqueue this identity-aware window.
+                System.err.println("[ack-cleanup] Retained "
+                        + (path == null ? "window" : path)
+                        + ": " + e.getMessage());
+            } finally {
+                if (path != null) ackCleanupInFlight.decrementAndGet();
+            }
+        }
+    }
+
     void awaitDrainThenExit(Collection<File> folders, TailerManager tailers, long sinceMs) {
         int clean = 0;
         while (true) {
@@ -186,7 +207,12 @@ public class GpuflAgent {
             // .tmp/ marker: a short trace finalizes that marker between our 1s polls, which
             // left the old sawActive gate spinning forever even after the upload drained.
             boolean started = tailers.hasStartedAnySession();
-            boolean idle = tailers.getActiveTailers().get() == 0 && !anyActiveSession(folders, sinceMs);
+            boolean cleanupIdle = acknowledgedWindows == null
+                    || (acknowledgedWindows.isEmpty()
+                        && ackCleanupInFlight.get() == 0);
+            boolean idle = tailers.getActiveTailers().get() == 0
+                    && cleanupIdle
+                    && !anyActiveSession(folders, sinceMs);
             clean = (started && idle) ? clean + 1 : 0;
             if (clean >= 2) return;
         }

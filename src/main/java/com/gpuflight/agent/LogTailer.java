@@ -106,8 +106,7 @@ public class LogTailer {
 
     private WindowMetadata metadataFor(File window, int index)
             throws IOException {
-        Path metadataPath = sessionDir().toPath().resolve(
-                ".gpufl-window." + logType + "." + index + ".json");
+        Path metadataPath = metadataPath(index);
         if (!Files.exists(metadataPath)) {
             SessionOwnership.State ownership =
                 SessionOwnership.probe(sessionDir().toPath());
@@ -131,6 +130,28 @@ public class LogTailer {
                 "window metadata does not match payload " + window.getName());
         }
         return metadata;
+    }
+
+    private Path metadataPath(int index) {
+        return sessionDir().toPath().resolve(
+                ".gpufl-window." + logType + "." + index + ".json");
+    }
+
+    /**
+     * A crash after persisting the post-ACK cursor but before local cleanup
+     * must not leak payloads forever. On restart, re-enqueue only windows
+     * proven identity-aware by their tombstones; legacy cursor history keeps
+     * its prior retention behavior.
+     */
+    private void enqueuePreviouslyAcknowledgedWindows(int nextIndex) {
+        if (consumedFilesQueue == null || !streamUploadSettings.enabled()) return;
+        for (int index = 1; index < nextIndex; ++index) {
+            File payload = resolveRotated(index);
+            if (payload != null && isGz(payload)
+                    && Files.isRegularFile(metadataPath(index))) {
+                consumedFilesQueue.offer(payload.toPath());
+            }
+        }
     }
 
     private static boolean checksumMatches(
@@ -260,6 +281,7 @@ public class LogTailer {
         // bytes already sent within it (mid-window resume after a crash).
         int idx = Math.max(1, cursor.fileIndex());
         long offset = cursor.fileIndex() >= 1 ? cursor.offset() : 0L;
+        enqueuePreviouslyAcknowledgedWindows(idx);
         System.out.println("[" + logType + "] Starting (window mode) - window index=" + idx + ", offset=" + offset);
 
         while (!Thread.currentThread().isInterrupted()) {

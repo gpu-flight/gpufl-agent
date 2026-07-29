@@ -126,6 +126,30 @@ class LogTailerTest {
     // ---- a complete window is sent whole ----
 
     @Test
+    void restartRequeuesIdentityWindowAcknowledgedBeforeCleanup(
+            @TempDir Path dir) throws Exception {
+        Path payload = gzWindow(
+                dir, "app", "device", 1,
+                "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n");
+        metadata(dir, "app", "device", 1, payload);
+        Path cursorFile = dir.resolve("cursor.json");
+        CursorManager cursors = new CursorManager(cursorFile.toFile());
+        cursors.update("app.device", 2, 0L);
+        var cleanup = new LinkedBlockingQueue<Path>();
+        var tailer = new LogTailer(
+                dir.toFile(), "app", "device", "gpu-trace",
+                cursors, cleanup, null,
+                new StreamUploadSettings(true, 10, 1_000_000L));
+
+        Thread thread = startTailer(tailer, new CapturingPublisher());
+        Path requeued = cleanup.poll(2, TimeUnit.SECONDS);
+        thread.interrupt();
+        thread.join(2000);
+
+        assertEquals(payload, requeued);
+    }
+
+    @Test
     void window_readsAndPublishes(@TempDir Path dir) throws Exception {
         window(dir, "app", "device", 1,
             "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n{\"type\":\"kernel_event\",\"name\":\"k2\"}\n");
