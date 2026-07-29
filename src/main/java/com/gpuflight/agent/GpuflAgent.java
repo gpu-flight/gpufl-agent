@@ -58,6 +58,8 @@ public class GpuflAgent {
 
         boolean exitWhenDrained = ConfigLoader.parseExitWhenDrained(args, env);
         boolean exitIfEmpty = ConfigLoader.parseExitIfEmpty(args, env);
+        boolean retainAcknowledgedPayloads =
+                ConfigLoader.parseRetainAcknowledgedPayloads(args, env);
         // A launcher-spawned --upload agent uploads only THIS run's sessions. The JVM
         // start time predates the target's session (the launcher spawns the agent
         // before it forks the target), so any session dir older than it is from an
@@ -118,7 +120,8 @@ public class GpuflAgent {
         LogArchiver archiver =
                 config.archiver() == null ? null : new LogArchiver(config.archiver());
         executor.submit(() -> processAcknowledgedWindows(
-                archiver, streamUploadSettings.enabled()));
+                archiver, streamUploadSettings.enabled()
+                        && !retainAcknowledgedPayloads));
 
         Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown));
 

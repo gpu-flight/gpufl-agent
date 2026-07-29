@@ -18,18 +18,28 @@ class ConfigLoaderTest {
         assertFalse(ConfigLoader.parseIgnorePreexisting(new String[]{}, NO_ENV));
         assertFalse(ConfigLoader.parsePruneFailed(new String[]{}, NO_ENV));
         assertFalse(ConfigLoader.parseExitIfEmpty(new String[]{}, NO_ENV));
+        assertFalse(ConfigLoader.parseRetainAcknowledgedPayloads(
+                new String[]{}, NO_ENV));
 
         // on via flag
         assertTrue(ConfigLoader.parsePruneFailed(new String[]{"--prune-failed=1"}, NO_ENV));
         assertTrue(ConfigLoader.parseExitIfEmpty(new String[]{"--exit-if-empty=true"}, NO_ENV));
+        assertTrue(ConfigLoader.parseRetainAcknowledgedPayloads(
+                new String[]{"--retain-acked-payloads=1"}, NO_ENV));
 
         // on via env
         assertTrue(ConfigLoader.parseExitWhenDrained(new String[]{}, Map.of("GPUFL_AGENT_EXIT_WHEN_DRAINED", "1")));
         assertTrue(ConfigLoader.parseIgnorePreexisting(new String[]{}, Map.of("GPUFL_AGENT_IGNORE_PREEXISTING", "1")));
+        assertTrue(ConfigLoader.parseRetainAcknowledgedPayloads(
+                new String[]{},
+                Map.of("GPUFL_AGENT_RETAIN_ACKED_PAYLOADS", "true")));
 
         // explicit false / 0 -> off
         assertFalse(ConfigLoader.parsePruneFailed(new String[]{"--prune-failed=false"}, NO_ENV));
         assertFalse(ConfigLoader.parseExitIfEmpty(new String[]{}, Map.of("GPUFL_AGENT_EXIT_IF_EMPTY", "0")));
+        assertFalse(ConfigLoader.parseRetainAcknowledgedPayloads(
+                new String[]{},
+                Map.of("GPUFL_AGENT_RETAIN_ACKED_PAYLOADS", "false")));
     }
 
     @Test

@@ -150,6 +150,20 @@ public class ConfigLoader {
     }
 
     /**
+     * Keep identity-aware payload files after backend acknowledgement. The
+     * experiment supervisor uses this because it computes quick results from
+     * those same files after its one-shot uploader exits, then removes the
+     * entire run directory itself.
+     */
+    public static boolean parseRetainAcknowledgedPayloads(
+            String[] args, Map<String, String> env) {
+        String v = resolve(
+                args, "retain-acked-payloads",
+                "GPUFL_AGENT_RETAIN_ACKED_PAYLOADS", null, env);
+        return v != null && !v.equalsIgnoreCase("false") && !v.equals("0");
+    }
+
+    /**
      * Scope a launcher-spawned {@code --upload} agent to THIS run: ignore every
      * session that already exists when the agent starts, uploading only sessions
      * that appear afterwards. A standalone agent (no flag) keeps scanning all
@@ -239,6 +253,7 @@ public class ConfigLoader {
               --upload-mode=<stream|legacy> Upload protocol           [GPUFL_AGENT_UPLOAD_MODE] default: stream
               --stream-max-lines=<n>       Stream batch line limit    [GPUFL_AGENT_STREAM_MAX_LINES] default: 5000
               --stream-max-bytes=<n>       Stream batch byte limit    [GPUFL_AGENT_STREAM_MAX_BYTES] default: 1000000
+              --retain-acked-payloads=<bool> Keep local window payloads after ACK [GPUFL_AGENT_RETAIN_ACKED_PAYLOADS] default: false
 
             Kafka publisher:
               --brokers=<host:port,...>    Bootstrap servers        [GPUFL_KAFKA_BROKERS]
