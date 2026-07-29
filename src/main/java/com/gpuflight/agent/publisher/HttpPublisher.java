@@ -3,6 +3,7 @@ package com.gpuflight.agent.publisher;
 import com.gpuflight.agent.config.HttpConfig;
 import com.gpuflight.agent.config.JsonSettings;
 import com.gpuflight.agent.model.LogWrapper;
+import com.gpuflight.agent.model.WindowMetadata;
 
 import java.io.ByteArrayOutputStream;
 import java.net.InetAddress;
@@ -103,12 +104,34 @@ public class HttpPublisher implements Publisher {
         return postGzStream(sessionId, gzBody);
     }
 
+    @Override
+    public boolean publishStreamGz(
+            String sessionId, WindowMetadata window, byte[] gzBody) {
+        if (window == null) {
+            return publishStreamGz(sessionId, gzBody);
+        }
+        if (gzBody == null || gzBody.length == 0) {
+            return true;
+        }
+        System.out.println("[agent] HTTP stream POST starting (window): url="
+            + config.streamEndpoint() + " session=" + sessionId
+            + " window=" + window.windowId()
+            + " sequence=" + window.windowSequence()
+            + " gzipBytes=" + gzBody.length);
+        return postGzStream(sessionId, gzBody, window);
+    }
+
     /**
      * POST an already-gzipped NDJSON body to the stream endpoint and interpret the
      * status. 2xx (accepted), 409 (already finalized on a restart) and 402 (limit)
      * all advance; anything else is a retryable failure.
      */
     private boolean postGzStream(String sessionId, byte[] gzBody) {
+        return postGzStream(sessionId, gzBody, null);
+    }
+
+    private boolean postGzStream(
+            String sessionId, byte[] gzBody, WindowMetadata window) {
         try {
             String url = config.streamEndpoint();
             var requestBuilder = HttpRequest.newBuilder()
@@ -118,6 +141,15 @@ public class HttpPublisher implements Publisher {
                 .header("X-GpuFlight-Session-Id", sessionId)
                 .header("X-GpuFlight-Hostname", InetAddress.getLocalHost().getHostName())
                 .POST(HttpRequest.BodyPublishers.ofByteArray(gzBody));
+            if (window != null) {
+                requestBuilder
+                    .header("X-GpuFlight-Window-Id", window.windowId())
+                    .header("X-GpuFlight-Window-Channel", window.channel())
+                    .header("X-GpuFlight-Window-Sequence",
+                            Long.toString(window.windowSequence()))
+                    .header("X-GpuFlight-Window-CRC32",
+                            Long.toUnsignedString(window.payloadCrc32()));
+            }
 
             addAuthHeader(requestBuilder);
 
@@ -126,6 +158,16 @@ public class HttpPublisher implements Publisher {
             if (sc >= 200 && sc <= 299) {
                 System.out.println("[agent] HTTP stream POST accepted: status=" + sc + " session=" + sessionId);
                 return true;
+            }
+            if (sc == 409 && window != null
+                    && response.body().contains("window_identity_conflict")) {
+                // Reusing an immutable UUID for different bytes is corruption,
+                // not the legacy "session already finalized" terminal success.
+                // Do not advance the cursor or delete the payload.
+                System.err.println("[GPUFL] transport window identity conflict - "
+                    + "refusing acknowledgement, session=" + sessionId
+                    + " window=" + window.windowId());
+                return false;
             }
             if (sc == 409) {
                 // Session already finalized on the backend - typically this agent

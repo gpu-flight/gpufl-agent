@@ -2,6 +2,7 @@ package com.gpuflight.agent;
 
 import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.model.LogWrapper;
+import com.gpuflight.agent.model.WindowMetadata;
 import com.gpuflight.agent.publisher.Publisher;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -37,6 +38,7 @@ class LogTailerTest {
     static class CapturingStreamPublisher implements Publisher {
         final List<List<String>> batches = new CopyOnWriteArrayList<>();
         final List<String> sessionIds = new CopyOnWriteArrayList<>();
+        final List<WindowMetadata> windows = new CopyOnWriteArrayList<>();
         @Override public boolean publish(String topic, String key, LogWrapper log) { return false; }
         @Override public boolean publishStream(String sessionId, List<String> ndjsonLines) {
             sessionIds.add(sessionId); batches.add(List.copyOf(ndjsonLines)); return true;
@@ -49,6 +51,11 @@ class LogTailerTest {
                 batches.add(java.util.Arrays.stream(text.split("\n")).filter(s -> !s.isEmpty()).toList());
             } catch (Exception e) { return false; }
             return true;
+        }
+        @Override public boolean publishStreamGz(
+                String sessionId, WindowMetadata window, byte[] gzBody) {
+            windows.add(window);
+            return publishStreamGz(sessionId, gzBody);
         }
         @Override public void close() {}
     }
@@ -74,6 +81,25 @@ class LogTailerTest {
         gzip(plain, gz);
         Files.delete(plain);
         return gz;
+    }
+
+    private static WindowMetadata metadata(
+            Path dir, String session, String channel, int index, Path payload)
+            throws IOException {
+        byte[] bytes = Files.readAllBytes(payload);
+        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+        crc.update(bytes);
+        WindowMetadata metadata = new WindowMetadata(
+                1, "transport_window",
+                "11111111-2222-4333-8444-555555555555",
+                session, channel, index, 10, 20, 30,
+                payload.getFileName().toString(), bytes.length, crc.getValue());
+        Files.writeString(
+                dir.resolve(session + "/.gpufl-window." + channel + "."
+                    + index + ".json"),
+                com.gpuflight.agent.config.JsonSettings.MAPPER
+                    .writeValueAsString(metadata));
+        return metadata;
     }
 
     private static Thread startTailer(LogTailer tailer, Publisher publisher) {
@@ -300,5 +326,69 @@ class LogTailerTest {
         t.interrupt(); t.join(2000);
         assertNotNull(consumed, "the sent window should be offered to the archive queue");
         assertEquals(gz.toAbsolutePath(), consumed.toAbsolutePath());
+    }
+
+    @Test
+    void identitySidecarIsVerifiedAndForwarded(@TempDir Path dir)
+            throws Exception {
+        Path gz = gzWindow(dir, "app", "device", 1,
+                "{\"type\":\"kernel_event\",\"session_id\":\"app\"}\n");
+        WindowMetadata expected = metadata(
+                dir, "app", "device", 1, gz);
+        var publisher = new CapturingStreamPublisher();
+        var thread = startTailer(
+                streamTailer(dir, "app", "device",
+                    new CursorManager(dir.resolve("cursor.json").toFile())),
+                publisher);
+        awaitEvents(publisher.batches, 1, 5000);
+        thread.interrupt();
+        thread.join(2000);
+
+        assertEquals(1, publisher.windows.size());
+        assertEquals(expected.windowId(),
+                publisher.windows.get(0).windowId());
+    }
+
+    @Test
+    void checksumMismatchNeverUploadsTheWindow(@TempDir Path dir)
+            throws Exception {
+        Path gz = gzWindow(dir, "app", "device", 1,
+                "{\"type\":\"kernel_event\",\"session_id\":\"app\"}\n");
+        metadata(dir, "app", "device", 1, gz);
+        Files.write(gz, new byte[] {1, 2, 3, 4});
+
+        var publisher = new CapturingStreamPublisher();
+        var thread = startTailer(
+                streamTailer(dir, "app", "device",
+                    new CursorManager(dir.resolve("cursor.json").toFile())),
+                publisher);
+        Thread.sleep(300);
+        thread.interrupt();
+        thread.join(2000);
+
+        assertTrue(publisher.batches.isEmpty());
+        assertTrue(publisher.windows.isEmpty());
+    }
+
+    @Test
+    void currentClientWindowWithoutMetadataNeverDowngradesToLegacy(
+            @TempDir Path dir) throws Exception {
+        gzWindow(dir, "app", "device", 1,
+                "{\"type\":\"kernel_event\",\"session_id\":\"app\"}\n");
+        Files.createFile(
+                dir.resolve("app").resolve(SessionOwnership.LOCK_FILE));
+
+        var publisher = new CapturingStreamPublisher();
+        var thread = startTailer(
+                streamTailer(dir, "app", "device",
+                    new CursorManager(dir.resolve("cursor.json").toFile())),
+                publisher);
+        Thread.sleep(300);
+        thread.interrupt();
+        thread.join(2000);
+
+        assertTrue(publisher.batches.isEmpty(),
+                "a lock-aware session must wait for identity metadata");
+        assertTrue(publisher.windows.isEmpty());
     }
 }

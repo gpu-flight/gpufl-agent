@@ -5,6 +5,7 @@ import com.gpuflight.agent.config.JsonSettings;
 import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.filter.DeviceMetricDeduplicator;
 import com.gpuflight.agent.model.LogWrapper;
+import com.gpuflight.agent.model.WindowMetadata;
 import com.gpuflight.agent.publisher.Publisher;
 import com.gpuflight.agent.util.Delays;
 import java.io.BufferedInputStream;
@@ -101,6 +102,44 @@ public class LogTailer {
         if (plain.exists()) return plain;
         File gz = new File(sessionDir(), logType + "." + index + ".log.gz");
         return gz.exists() ? gz : null;
+    }
+
+    private WindowMetadata metadataFor(File window, int index)
+            throws IOException {
+        Path metadataPath = sessionDir().toPath().resolve(
+                ".gpufl-window." + logType + "." + index + ".json");
+        if (!Files.exists(metadataPath)) {
+            SessionOwnership.State ownership =
+                SessionOwnership.probe(sessionDir().toPath());
+            if (ownership == SessionOwnership.State.LEGACY_NO_LOCK) {
+                return null; // backward-compatible window from an older client
+            }
+            // A current client publishes identity before it makes the payload
+            // visible. Missing metadata is therefore either the tiny recovery
+            // interval of an older lock-aware build or a damaged contract, not
+            // permission to silently downgrade exact-once upload to legacy.
+            throw new IOException(
+                "identity metadata not visible yet for current-client payload "
+                    + window.getName());
+        }
+        WindowMetadata metadata =
+            JsonSettings.MAPPER.readValue(metadataPath.toFile(),
+                                          WindowMetadata.class);
+        if (!metadata.isValidFor(
+                sessionId, logType, index, window.getName())) {
+            throw new IOException(
+                "window metadata does not match payload " + window.getName());
+        }
+        return metadata;
+    }
+
+    private static boolean checksumMatches(
+            WindowMetadata metadata, byte[] payload) {
+        if (metadata == null) return true;
+        CRC32 crc = new CRC32();
+        crc.update(payload);
+        return metadata.payloadBytes() == payload.length
+                && metadata.payloadCrc32() == crc.getValue();
     }
 
     private static boolean isGz(File f) {
@@ -244,6 +283,22 @@ public class LogTailer {
             // Window <idx> not published yet. Is the session still writing?
             File tmp = sessionTmpDir();
             if (tmp.exists()) {
+                SessionOwnership.State ownership =
+                    SessionOwnership.probe(sessionDir().toPath());
+                if (ownership == SessionOwnership.State.ACTIVE
+                        || ownership == SessionOwnership.State.UNKNOWN) {
+                    // A quiet workload can leave `.tmp` unchanged for much
+                    // longer than the legacy mtime grace. The OS lock is the
+                    // authoritative liveness signal and survives that silence.
+                    if (!Delays.sleep(Delays.LOG_TAILER_POLL)) break;
+                    continue;
+                }
+                if (ownership == SessionOwnership.State.UNOWNED) {
+                    System.out.println("[" + logType + "] Session finished "
+                            + "(ownership lock released - client gone; last sent "
+                            + (idx - 1) + ").");
+                    return true;
+                }
                 // A live client keeps appending to .tmp/ (system sampling alone
                 // advances its mtime); a client that crashed or was killed leaves
                 // .tmp/ frozen and never removed. Once it has sat unchanged past the
@@ -261,8 +316,19 @@ public class LogTailer {
             // .tmp/ gone -> the client closed every channel. Each channel's last
             // window is published BEFORE .tmp/ is removed, so wait a moment then do
             // one final check for a straggler before finishing.
+            SessionOwnership.State ownership =
+                SessionOwnership.probe(sessionDir().toPath());
+            if (ownership == SessionOwnership.State.ACTIVE
+                    || ownership == SessionOwnership.State.UNKNOWN) {
+                if (!Delays.sleep(Delays.LOG_TAILER_POLL)) break;
+                continue;
+            }
             if (!Delays.sleep(Delays.SESSION_END_GRACE_PERIOD)) break;
-            if (resolveRotated(idx) != null) continue;
+            if (resolveRotated(idx) != null
+                    || SessionOwnership.probe(sessionDir().toPath())
+                        == SessionOwnership.State.ACTIVE) {
+                continue;
+            }
             System.out.println("[" + logType + "] Session finished (.tmp gone, no window "
                     + idx + "; last sent " + (idx - 1) + ").");
             return false; // clean: producer closed and removed .tmp/
@@ -309,8 +375,15 @@ public class LogTailer {
         // (.log) windows from a no-compressor build fall through to the line path below.
         if (streamUploadSettings.enabled() && isGz(window)) {
             try {
+                WindowMetadata metadata = metadataFor(window, idx);
                 byte[] gz = Files.readAllBytes(window.toPath());
-                if (publisher.publishStreamGz(sessionId, gz)) {
+                if (!checksumMatches(metadata, gz)) {
+                    System.err.println("[" + logType + "] window checksum "
+                            + "mismatch - refusing upload: "
+                            + window.getName());
+                    return 0L;
+                }
+                if (publisher.publishStreamGz(sessionId, metadata, gz)) {
                     // Persist the window-done advance right after the durable 2xx so a crash
                     // before tail() advances won't re-send the whole window on restart (the
                     // line path likewise persists the cursor after each accepted batch).

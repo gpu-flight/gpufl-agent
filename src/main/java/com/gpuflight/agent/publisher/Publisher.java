@@ -1,6 +1,7 @@
 package com.gpuflight.agent.publisher;
 
 import com.gpuflight.agent.model.LogWrapper;
+import com.gpuflight.agent.model.WindowMetadata;
 
 import java.io.Closeable;
 import java.util.List;
@@ -23,6 +24,15 @@ public interface Publisher extends Closeable {
      */
     default boolean publishStreamGz(String sessionId, byte[] gzBody) {
         return false;
+    }
+
+    /**
+     * Identity-aware variant. Implementations that have not adopted the
+     * window contract retain the legacy behavior through this default.
+     */
+    default boolean publishStreamGz(
+            String sessionId, WindowMetadata window, byte[] gzBody) {
+        return publishStreamGz(sessionId, gzBody);
     }
 
     /**
