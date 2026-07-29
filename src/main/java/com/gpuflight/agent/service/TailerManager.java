@@ -2,6 +2,7 @@ package com.gpuflight.agent.service;
 
 import com.gpuflight.agent.CursorManager;
 import com.gpuflight.agent.LogTailer;
+import com.gpuflight.agent.SessionOwnership;
 import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.filter.DeviceMetricDeduplicator;
 import com.gpuflight.agent.model.DiscoveredSession;
@@ -74,9 +75,16 @@ public class TailerManager {
                     if (tailer.tail(publisher)) orphaned.set(true);  // finished off a stale .tmp/
                     if (!Thread.currentThread().isInterrupted()
                             && remaining.decrementAndGet() == 0) {
+                        boolean transportLoss =
+                            SessionOwnership.hasTransportLoss(sessionDir.toPath());
+                        if (transportLoss) {
+                            orphaned.set(true);
+                            log.error("session {} has a durable transport-loss "
+                                    + "marker; refusing session-complete", sid);
+                        }
                         // Last channel done: every available window is uploaded. Signal the
                         // backend (stream mode), then settle the session so a re-scan skips it.
-                        if (streamUploadSettings.enabled()) {
+                        if (streamUploadSettings.enabled() && !transportLoss) {
                             signalSessionComplete(publisher, sid);
                         }
                         settleSession(sessionDir, orphaned.get());

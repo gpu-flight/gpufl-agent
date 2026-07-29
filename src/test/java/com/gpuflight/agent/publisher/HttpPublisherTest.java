@@ -2,6 +2,7 @@ package com.gpuflight.agent.publisher;
 
 import com.gpuflight.agent.config.HttpConfig;
 import com.gpuflight.agent.model.LogWrapper;
+import com.gpuflight.agent.model.WindowMetadata;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,6 +32,7 @@ class HttpPublisherTest {
     private final AtomicReference<String> lastContentType = new AtomicReference<>();
     private final AtomicReference<String> lastPath = new AtomicReference<>();
     private final AtomicReference<String> lastSessionId = new AtomicReference<>();
+    private final AtomicReference<String> responseBody = new AtomicReference<>("");
 
     @BeforeEach
     void startServer() throws IOException {
@@ -47,7 +49,9 @@ class HttpPublisherTest {
             lastContentType.set(headers.getFirst("Content-Type"));
             lastPath.set(exchange.getRequestURI().getPath());
             lastSessionId.set(headers.getFirst("X-GpuFlight-Session-Id"));
-            exchange.sendResponseHeaders(statusToReturn.get(), 0);
+            byte[] response = responseBody.get().getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(statusToReturn.get(), response.length);
+            exchange.getResponseBody().write(response);
             exchange.close();
         });
         server.start();
@@ -86,6 +90,14 @@ class HttpPublisherTest {
             gz.write(s.getBytes(StandardCharsets.UTF_8));
         }
         return out.toByteArray();
+    }
+
+    private static WindowMetadata windowMetadata(byte[] body) {
+        return new WindowMetadata(
+                1, "transport_window",
+                "10000000-0000-4000-8000-000000000001",
+                "session-1", "device", 1, 0, 1, 1,
+                "device.1.log.gz", body.length, 123);
     }
 
     @Test
@@ -203,6 +215,61 @@ class HttpPublisherTest {
             List.of("{\"type\":\"kernel_event\",\"session_id\":\"session-1\"}"));
 
         assertTrue(ok, "409 already-uploaded must advance the cursor, not retry forever");
+    }
+
+    @Test
+    void publishWindow_identityConflict409NeverAdvances() throws IOException {
+        statusToReturn.set(409);
+        responseBody.set("{\"code\":\"window_identity_conflict\"}");
+        HttpConfig config = new HttpConfig(
+                hostUrl(), "v1", null, 5, "stream", 100, 1_000_000L);
+        HttpPublisher pub = new HttpPublisher(config);
+        byte[] body = gzipBytes("{\"type\":\"kernel_event\"}\n");
+        WindowMetadata metadata = new WindowMetadata(
+                1, "transport_window",
+                "10000000-0000-4000-8000-000000000001",
+                "session-1", "device", 1, 0, 1, 1,
+                "device.1.log.gz", body.length, 123);
+
+        boolean ok = pub.publishStreamGz("session-1", metadata, body);
+
+        assertFalse(ok, "identity conflict must preserve the payload and cursor");
+    }
+
+    @Test
+    void publishWindow_oldBackend202AcceptsButCannotAuthorizeDeletion()
+            throws IOException {
+        statusToReturn.set(202);
+        responseBody.set(
+                "{\"accepted_for_processing\":true,\"spool_id\":\"legacy\"}");
+        HttpPublisher pub = new HttpPublisher(new HttpConfig(
+                hostUrl(), "v1", null, 5,
+                "stream", 100, 1_000_000L));
+        byte[] body = gzipBytes("{\"type\":\"kernel_event\"}\n");
+
+        WindowPublishResult result = pub.publishTransportWindow(
+                "session-1", windowMetadata(body), body);
+
+        assertTrue(result.accepted());
+        assertFalse(result.identityAcknowledged(),
+                "legacy 2xx must retain the local replayable payload");
+    }
+
+    @Test
+    void publishWindow_newBackendAckAuthorizesDeletion()
+            throws IOException {
+        statusToReturn.set(202);
+        responseBody.set("{\"window_acknowledged\":true}");
+        HttpPublisher pub = new HttpPublisher(new HttpConfig(
+                hostUrl(), "v1", null, 5,
+                "stream", 100, 1_000_000L));
+        byte[] body = gzipBytes("{\"type\":\"kernel_event\"}\n");
+
+        WindowPublishResult result = pub.publishTransportWindow(
+                "session-1", windowMetadata(body), body);
+
+        assertTrue(result.accepted());
+        assertTrue(result.identityAcknowledged());
     }
 
     @Test

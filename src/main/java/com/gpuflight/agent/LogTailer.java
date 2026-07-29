@@ -1,11 +1,14 @@
 package com.gpuflight.agent;
 
+import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 import com.gpuflight.agent.config.JsonSettings;
 import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.filter.DeviceMetricDeduplicator;
 import com.gpuflight.agent.model.LogWrapper;
+import com.gpuflight.agent.model.WindowMetadata;
 import com.gpuflight.agent.publisher.Publisher;
+import com.gpuflight.agent.publisher.WindowPublishResult;
 import com.gpuflight.agent.util.Delays;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
@@ -52,6 +55,8 @@ public class LogTailer {
 
     /** Bytes of uncompressed head used for the content signature. */
     private static final int HEAD_SIG_BYTES = 512;
+    private static final long PERMANENT_WINDOW_FAILURE = Long.MIN_VALUE;
+    private String permanentWindowFailureReason;
 
     public LogTailer(File folder, String sessionId, String logType, String topicPrefix,
                      CursorManager cursorMgr, BlockingQueue<Path> consumedFilesQueue) {
@@ -101,6 +106,73 @@ public class LogTailer {
         if (plain.exists()) return plain;
         File gz = new File(sessionDir(), logType + "." + index + ".log.gz");
         return gz.exists() ? gz : null;
+    }
+
+    private WindowMetadata metadataFor(File window, int index)
+            throws IOException {
+        Path metadataPath = metadataPath(index);
+        if (!Files.exists(metadataPath)) {
+            SessionOwnership.State ownership =
+                SessionOwnership.probe(sessionDir().toPath());
+            if (ownership == SessionOwnership.State.LEGACY_NO_LOCK) {
+                return null; // backward-compatible window from an older client
+            }
+            // A current client publishes identity before it makes the payload
+            // visible. Missing metadata is therefore either the tiny recovery
+            // interval of an older lock-aware build or a damaged contract, not
+            // permission to silently downgrade exact-once upload to legacy.
+            throw new IOException(
+                "identity metadata not visible yet for current-client payload "
+                    + window.getName());
+        }
+        WindowMetadata metadata;
+        try {
+            metadata = JsonSettings.MAPPER.readValue(
+                    metadataPath.toFile(), WindowMetadata.class);
+        } catch (JacksonException malformed) {
+            throw new PermanentWindowException(
+                    "window identity metadata is malformed for "
+                            + window.getName());
+        }
+        if (!metadata.isValidFor(
+                sessionId, logType, index, window.getName())) {
+            throw new PermanentWindowException(
+                "window metadata does not match payload " + window.getName());
+        }
+        return metadata;
+    }
+
+    private Path metadataPath(int index) {
+        return sessionDir().toPath().resolve(
+                ".gpufl-window." + logType + "." + index + ".json");
+    }
+
+    /**
+     * A crash after persisting the post-ACK cursor but before local cleanup
+     * must not leak payloads forever. On restart, re-enqueue only windows
+     * proven identity-aware by their tombstones; legacy cursor history keeps
+     * its prior retention behavior.
+     */
+    private void enqueuePreviouslyAcknowledgedWindows(int nextIndex) {
+        if (consumedFilesQueue == null || !streamUploadSettings.enabled()) return;
+        for (int index = 1; index < nextIndex; ++index) {
+            File payload = resolveRotated(index);
+            if (payload != null && isGz(payload)
+                    && Files.isRegularFile(metadataPath(index))
+                    && AcknowledgedWindowCleaner.hasBackendAcknowledgement(
+                        sessionDir().toPath(), logType, index)) {
+                consumedFilesQueue.offer(payload.toPath());
+            }
+        }
+    }
+
+    private static boolean checksumMatches(
+            WindowMetadata metadata, byte[] payload) {
+        if (metadata == null) return true;
+        CRC32 crc = new CRC32();
+        crc.update(payload);
+        return metadata.payloadBytes() == payload.length
+                && metadata.payloadCrc32() == crc.getValue();
     }
 
     private static boolean isGz(File f) {
@@ -221,13 +293,38 @@ public class LogTailer {
         // bytes already sent within it (mid-window resume after a crash).
         int idx = Math.max(1, cursor.fileIndex());
         long offset = cursor.fileIndex() >= 1 ? cursor.offset() : 0L;
+        if (SessionOwnership.hasAgentWindowFailure(
+                sessionDir().toPath(), logType, idx)) {
+            System.err.println("[" + logType + "] prior permanent transport "
+                    + "window failure is still present; refusing "
+                    + "session-complete");
+            return true;
+        }
+        enqueuePreviouslyAcknowledgedWindows(idx);
         System.out.println("[" + logType + "] Starting (window mode) - window index=" + idx + ", offset=" + offset);
 
         while (!Thread.currentThread().isInterrupted()) {
             File window = resolveRotated(idx);
             if (window != null) {
                 long resume = drainWindow(window, offset, publisher, idx);
-                if (resume < 0) {
+                if (resume == PERMANENT_WINDOW_FAILURE) {
+                    String reason = permanentWindowFailureReason == null
+                            ? "immutable_window_contract_violation"
+                            : permanentWindowFailureReason;
+                    boolean marked =
+                            SessionOwnership.recordAgentWindowFailure(
+                                    sessionDir().toPath(), logType, idx, reason);
+                    System.err.println("[" + logType + "] permanent transport "
+                            + "window failure at " + window.getName() + ": "
+                            + reason + ". Payload retained; session-complete "
+                            + "will not be emitted."
+                            + (marked ? ""
+                                : " WARNING: durable loss marker write failed."));
+                    if (marked) return true;
+                    // Never fall through to session-complete without a
+                    // durable indication that this profile is incomplete.
+                    if (!Delays.sleep(Delays.LOG_TAILER_RETRY)) break;
+                } else if (resume < 0) {
                     System.out.println("[" + logType + "] Sent window " + window.getName() + ".");
                     if (consumedFilesQueue != null) consumedFilesQueue.offer(window.toPath());
                     idx++;
@@ -241,9 +338,37 @@ public class LogTailer {
                 continue;
             }
 
+            // The backend ACK can be durable before local payload cleanup and
+            // cursor persistence. If cleanup won that race and this agent then
+            // crashed, the ACK tombstone is enough to skip the absent payload
+            // and continue with the next sequence on restart.
+            if (AcknowledgedWindowCleaner.hasBackendAcknowledgement(
+                    sessionDir().toPath(), logType, idx)) {
+                idx++;
+                offset = 0L;
+                cursorMgr.update(streamKey, idx, offset);
+                continue;
+            }
+
             // Window <idx> not published yet. Is the session still writing?
             File tmp = sessionTmpDir();
             if (tmp.exists()) {
+                SessionOwnership.State ownership =
+                    SessionOwnership.probe(sessionDir().toPath());
+                if (ownership == SessionOwnership.State.ACTIVE
+                        || ownership == SessionOwnership.State.UNKNOWN) {
+                    // A quiet workload can leave `.tmp` unchanged for much
+                    // longer than the legacy mtime grace. The OS lock is the
+                    // authoritative liveness signal and survives that silence.
+                    if (!Delays.sleep(Delays.LOG_TAILER_POLL)) break;
+                    continue;
+                }
+                if (ownership == SessionOwnership.State.UNOWNED) {
+                    System.out.println("[" + logType + "] Session finished "
+                            + "(ownership lock released - client gone; last sent "
+                            + (idx - 1) + ").");
+                    return true;
+                }
                 // A live client keeps appending to .tmp/ (system sampling alone
                 // advances its mtime); a client that crashed or was killed leaves
                 // .tmp/ frozen and never removed. Once it has sat unchanged past the
@@ -261,8 +386,19 @@ public class LogTailer {
             // .tmp/ gone -> the client closed every channel. Each channel's last
             // window is published BEFORE .tmp/ is removed, so wait a moment then do
             // one final check for a straggler before finishing.
+            SessionOwnership.State ownership =
+                SessionOwnership.probe(sessionDir().toPath());
+            if (ownership == SessionOwnership.State.ACTIVE
+                    || ownership == SessionOwnership.State.UNKNOWN) {
+                if (!Delays.sleep(Delays.LOG_TAILER_POLL)) break;
+                continue;
+            }
             if (!Delays.sleep(Delays.SESSION_END_GRACE_PERIOD)) break;
-            if (resolveRotated(idx) != null) continue;
+            if (resolveRotated(idx) != null
+                    || SessionOwnership.probe(sessionDir().toPath())
+                        == SessionOwnership.State.ACTIVE) {
+                continue;
+            }
             System.out.println("[" + logType + "] Session finished (.tmp gone, no window "
                     + idx + "; last sent " + (idx - 1) + ").");
             return false; // clean: producer closed and removed .tmp/
@@ -309,8 +445,28 @@ public class LogTailer {
         // (.log) windows from a no-compressor build fall through to the line path below.
         if (streamUploadSettings.enabled() && isGz(window)) {
             try {
+                WindowMetadata metadata = metadataFor(window, idx);
                 byte[] gz = Files.readAllBytes(window.toPath());
-                if (publisher.publishStreamGz(sessionId, gz)) {
+                if (!checksumMatches(metadata, gz)) {
+                    permanentWindowFailureReason =
+                            "payload_checksum_mismatch:" + window.getName();
+                    return PERMANENT_WINDOW_FAILURE;
+                }
+                WindowPublishResult published = metadata == null
+                        ? (publisher.publishStreamGz(sessionId, gz)
+                            ? WindowPublishResult.acceptedLegacy()
+                            : WindowPublishResult.retry())
+                        : publisher.publishTransportWindow(
+                                sessionId, metadata, gz);
+                if (published.accepted()) {
+                    if (published.identityAcknowledged()
+                            && !AcknowledgedWindowCleaner
+                                .recordBackendAcknowledgement(
+                                    sessionDir().toPath(), metadata)) {
+                        // The backend can safely deduplicate the retry. Do not
+                        // advance until deletion authorization is durable.
+                        return 0L;
+                    }
                     // Persist the window-done advance right after the durable 2xx so a crash
                     // before tail() advances won't re-send the whole window on restart (the
                     // line path likewise persists the cursor after each accepted batch).
@@ -319,6 +475,9 @@ public class LogTailer {
                 }
                 System.out.println("[" + logType + "] window publish FAILED - retry in 5s");
                 return 0L;
+            } catch (PermanentWindowException e) {
+                permanentWindowFailureReason = e.getMessage();
+                return PERMANENT_WINDOW_FAILURE;
             } catch (IOException e) {
                 System.out.println("[" + logType + "] read error on " + window.getName() + ": " + e.getMessage());
                 return 0L;
@@ -507,5 +666,11 @@ public class LogTailer {
             remaining -= r;
         }
         return total;
+    }
+
+    private static final class PermanentWindowException extends IOException {
+        PermanentWindowException(String message) {
+            super(message);
+        }
     }
 }

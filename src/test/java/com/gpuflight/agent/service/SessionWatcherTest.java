@@ -70,6 +70,20 @@ class SessionWatcherTest {
     }
 
     @Test
+    void discoversSessionAfterAckCleanupLeavesOnlyWindowTombstone(
+            @TempDir Path root) throws IOException {
+        Path session = Files.createDirectories(root.resolve("acked-not-settled"));
+        Files.writeString(
+                session.resolve(".gpufl-window.device.1.json"), "{}");
+
+        List<DiscoveredSession> found =
+                SessionWatcher.discoverSources(root.toFile(), TYPES);
+
+        assertEquals(1, found.size());
+        assertEquals("acked-not-settled", found.get(0).sessionId());
+    }
+
+    @Test
     void ignoresDirsWithoutChannelFilesAndDotDirs(@TempDir Path root) throws IOException {
         Files.createDirectories(root.resolve("not-a-session").resolve("random"));
         Files.writeString(root.resolve("not-a-session").resolve("notes.txt"), "x");
