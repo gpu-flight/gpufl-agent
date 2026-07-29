@@ -8,6 +8,7 @@ import com.gpuflight.agent.filter.DeviceMetricDeduplicator;
 import com.gpuflight.agent.model.LogWrapper;
 import com.gpuflight.agent.model.WindowMetadata;
 import com.gpuflight.agent.publisher.Publisher;
+import com.gpuflight.agent.publisher.WindowPublishResult;
 import com.gpuflight.agent.util.Delays;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
@@ -157,7 +158,9 @@ public class LogTailer {
         for (int index = 1; index < nextIndex; ++index) {
             File payload = resolveRotated(index);
             if (payload != null && isGz(payload)
-                    && Files.isRegularFile(metadataPath(index))) {
+                    && Files.isRegularFile(metadataPath(index))
+                    && AcknowledgedWindowCleaner.hasBackendAcknowledgement(
+                        sessionDir().toPath(), logType, index)) {
                 consumedFilesQueue.offer(payload.toPath());
             }
         }
@@ -335,6 +338,18 @@ public class LogTailer {
                 continue;
             }
 
+            // The backend ACK can be durable before local payload cleanup and
+            // cursor persistence. If cleanup won that race and this agent then
+            // crashed, the ACK tombstone is enough to skip the absent payload
+            // and continue with the next sequence on restart.
+            if (AcknowledgedWindowCleaner.hasBackendAcknowledgement(
+                    sessionDir().toPath(), logType, idx)) {
+                idx++;
+                offset = 0L;
+                cursorMgr.update(streamKey, idx, offset);
+                continue;
+            }
+
             // Window <idx> not published yet. Is the session still writing?
             File tmp = sessionTmpDir();
             if (tmp.exists()) {
@@ -437,7 +452,21 @@ public class LogTailer {
                             "payload_checksum_mismatch:" + window.getName();
                     return PERMANENT_WINDOW_FAILURE;
                 }
-                if (publisher.publishStreamGz(sessionId, metadata, gz)) {
+                WindowPublishResult published = metadata == null
+                        ? (publisher.publishStreamGz(sessionId, gz)
+                            ? WindowPublishResult.acceptedLegacy()
+                            : WindowPublishResult.retry())
+                        : publisher.publishTransportWindow(
+                                sessionId, metadata, gz);
+                if (published.accepted()) {
+                    if (published.identityAcknowledged()
+                            && !AcknowledgedWindowCleaner
+                                .recordBackendAcknowledgement(
+                                    sessionDir().toPath(), metadata)) {
+                        // The backend can safely deduplicate the retry. Do not
+                        // advance until deletion authorization is durable.
+                        return 0L;
+                    }
                     // Persist the window-done advance right after the durable 2xx so a crash
                     // before tail() advances won't re-send the whole window on restart (the
                     // line path likewise persists the cursor after each accepted batch).

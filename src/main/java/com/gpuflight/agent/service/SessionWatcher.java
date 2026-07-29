@@ -22,6 +22,9 @@ public class SessionWatcher {
 
     private static final Pattern CHANNEL_FILE_PATTERN =
             Pattern.compile("^(device|scope|system|sass)(?:\\.\\d+)?\\.log(?:\\.gz)?$");
+    private static final Pattern WINDOW_TOMBSTONE_PATTERN =
+            Pattern.compile("^\\.gpufl-window\\."
+                    + "(device|scope|system|sass)\\.[1-9][0-9]*\\.json$");
 
     /** Marker file the agent drops in a session dir once every channel has been
      *  fully uploaded. Discovery skips a session that has it, so a re-scan never
@@ -132,7 +135,9 @@ public class SessionWatcher {
         if (inside == null) return false;
         for (File child : inside) {
             if (child.isFile() &&
-                    CHANNEL_FILE_PATTERN.matcher(child.getName()).matches()) {
+                    (CHANNEL_FILE_PATTERN.matcher(child.getName()).matches()
+                    || WINDOW_TOMBSTONE_PATTERN.matcher(
+                            child.getName()).matches())) {
                 return true;
             }
         }

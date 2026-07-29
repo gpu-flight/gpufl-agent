@@ -36,6 +36,18 @@ public interface Publisher extends Closeable {
     }
 
     /**
+     * Identity-aware result used by the tailer. Legacy implementations can
+     * accept the bytes, but may not authorize local deletion because they
+     * cannot prove that a transport-window identity was registered.
+     */
+    default WindowPublishResult publishTransportWindow(
+            String sessionId, WindowMetadata window, byte[] gzBody) {
+        return publishStreamGz(sessionId, window, gzBody)
+                ? WindowPublishResult.acceptedLegacy()
+                : WindowPublishResult.retry();
+    }
+
+    /**
      * Signal the backend that EVERY channel of {@code sessionId} has finished
      * uploading — the agent has drained all per-channel tailers and every batch
      * was accepted. Lets the backend finalize the session immediately instead of

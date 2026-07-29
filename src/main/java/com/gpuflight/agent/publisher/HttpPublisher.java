@@ -107,18 +107,26 @@ public class HttpPublisher implements Publisher {
     @Override
     public boolean publishStreamGz(
             String sessionId, WindowMetadata window, byte[] gzBody) {
+        return publishTransportWindow(sessionId, window, gzBody).accepted();
+    }
+
+    @Override
+    public WindowPublishResult publishTransportWindow(
+            String sessionId, WindowMetadata window, byte[] gzBody) {
         if (window == null) {
-            return publishStreamGz(sessionId, gzBody);
+            return publishStreamGz(sessionId, gzBody)
+                    ? WindowPublishResult.acceptedLegacy()
+                    : WindowPublishResult.retry();
         }
         if (gzBody == null || gzBody.length == 0) {
-            return true;
+            return WindowPublishResult.acceptedLegacy();
         }
         System.out.println("[agent] HTTP stream POST starting (window): url="
             + config.streamEndpoint() + " session=" + sessionId
             + " window=" + window.windowId()
             + " sequence=" + window.windowSequence()
             + " gzipBytes=" + gzBody.length);
-        return postGzStream(sessionId, gzBody, window);
+        return postGzStreamResult(sessionId, gzBody, window);
     }
 
     /**
@@ -127,10 +135,10 @@ public class HttpPublisher implements Publisher {
      * all advance; anything else is a retryable failure.
      */
     private boolean postGzStream(String sessionId, byte[] gzBody) {
-        return postGzStream(sessionId, gzBody, null);
+        return postGzStreamResult(sessionId, gzBody, null).accepted();
     }
 
-    private boolean postGzStream(
+    private WindowPublishResult postGzStreamResult(
             String sessionId, byte[] gzBody, WindowMetadata window) {
         try {
             String url = config.streamEndpoint();
@@ -157,7 +165,16 @@ public class HttpPublisher implements Publisher {
             int sc = response.statusCode();
             if (sc >= 200 && sc <= 299) {
                 System.out.println("[agent] HTTP stream POST accepted: status=" + sc + " session=" + sessionId);
-                return true;
+                if (window != null && identityAcknowledged(response.body())) {
+                    return WindowPublishResult.acceptedIdentity();
+                }
+                if (window != null) {
+                    System.err.println("[GPUFL] backend accepted transport "
+                        + "window through a legacy/unconfirmed path; local "
+                        + "payload will be retained, session=" + sessionId
+                        + " window=" + window.windowId());
+                }
+                return WindowPublishResult.acceptedLegacy();
             }
             if (sc == 409 && window != null
                     && response.body().contains("window_identity_conflict")) {
@@ -167,7 +184,7 @@ public class HttpPublisher implements Publisher {
                 System.err.println("[GPUFL] transport window identity conflict - "
                     + "refusing acknowledgement, session=" + sessionId
                     + " window=" + window.windowId());
-                return false;
+                return WindowPublishResult.retry();
             }
             if (sc == 409) {
                 // Session already finalized on the backend - typically this agent
@@ -177,21 +194,31 @@ public class HttpPublisher implements Publisher {
                 // re-POSTing forever.
                 System.out.println("[agent] HTTP stream POST: session already uploaded (409) - "
                     + "skipping, session=" + sessionId);
-                return true;
+                return WindowPublishResult.acceptedLegacy();
             }
             if (sc == 402) {
                 // GPU/workspace limit exceeded - permanent; retrying won't help.
                 System.err.println("[GPUFL] GPU limit exceeded for this workspace - "
                     + "skipping session=" + sessionId + ". " + response.body());
-                return true;
+                return WindowPublishResult.acceptedLegacy();
             }
             System.out.println("HTTP stream publish failed [" + url + "]: " + sc + " - " + response.body());
-            return false;
+            return WindowPublishResult.retry();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return false;
+            return WindowPublishResult.retry();
         } catch (Exception e) {
             logConnectionError("HTTP stream", e);
+            return WindowPublishResult.retry();
+        }
+    }
+
+    private static boolean identityAcknowledged(String body) {
+        if (body == null || body.isBlank()) return false;
+        try {
+            return JsonSettings.MAPPER.readTree(body)
+                    .path("window_acknowledged").asBoolean(false);
+        } catch (Exception malformedResponse) {
             return false;
         }
     }

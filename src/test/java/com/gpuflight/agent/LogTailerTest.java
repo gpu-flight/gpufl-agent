@@ -4,6 +4,7 @@ import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.model.LogWrapper;
 import com.gpuflight.agent.model.WindowMetadata;
 import com.gpuflight.agent.publisher.Publisher;
+import com.gpuflight.agent.publisher.WindowPublishResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -58,16 +59,32 @@ class LogTailerTest {
             windows.add(window);
             return publishStreamGz(sessionId, gzBody);
         }
+        @Override public WindowPublishResult publishTransportWindow(
+                String sessionId, WindowMetadata window, byte[] gzBody) {
+            windows.add(window);
+            return publishStreamGz(sessionId, gzBody)
+                    ? WindowPublishResult.acceptedIdentity()
+                    : WindowPublishResult.retry();
+        }
         @Override public void close() {}
     }
 
     static class FailingStreamPublisher extends CapturingStreamPublisher {
         final CountDownLatch attempted = new CountDownLatch(1);
 
-        @Override public boolean publishStreamGz(
+        @Override public WindowPublishResult publishTransportWindow(
                 String sessionId, WindowMetadata window, byte[] gzBody) {
             attempted.countDown();
-            return false;
+            return WindowPublishResult.retry();
+        }
+    }
+
+    static class LegacyAcceptingPublisher extends CapturingStreamPublisher {
+        @Override public WindowPublishResult publishTransportWindow(
+                String sessionId, WindowMetadata window, byte[] gzBody) {
+            windows.add(window);
+            publishStreamGz(sessionId, gzBody);
+            return WindowPublishResult.acceptedLegacy();
         }
     }
 
@@ -142,7 +159,10 @@ class LogTailerTest {
         Path payload = gzWindow(
                 dir, "app", "device", 1,
                 "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n");
-        metadata(dir, "app", "device", 1, payload);
+        WindowMetadata acknowledged =
+                metadata(dir, "app", "device", 1, payload);
+        assertTrue(AcknowledgedWindowCleaner.recordBackendAcknowledgement(
+                dir.resolve("app"), acknowledged));
         Path cursorFile = dir.resolve("cursor.json");
         CursorManager cursors = new CursorManager(cursorFile.toFile());
         cursors.update("app.device", 2, 0L);
@@ -158,6 +178,81 @@ class LogTailerTest {
         thread.join(2000);
 
         assertEquals(payload, requeued);
+    }
+
+    @Test
+    void oldBackendAcceptanceAdvancesButRetainsPayload(
+            @TempDir Path dir) throws Exception {
+        Path payload = gzWindow(
+                dir, "app", "device", 1,
+                "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n");
+        metadata(dir, "app", "device", 1, payload);
+        Path cursorFile = dir.resolve("cursor.json");
+        var cleanup = new LinkedBlockingQueue<Path>();
+        var publisher = new LegacyAcceptingPublisher();
+        var tailer = new LogTailer(
+                dir.toFile(), "app", "device", "gpu-trace",
+                new CursorManager(cursorFile.toFile()), cleanup, null,
+                new StreamUploadSettings(true, 10, 1_000_000L));
+        var thread = startTailer(tailer, publisher);
+
+        Path offered = cleanup.poll(2, TimeUnit.SECONDS);
+        thread.interrupt();
+        thread.join(2000);
+
+        assertEquals(payload, offered);
+        assertFalse(AcknowledgedWindowCleaner.deleteIfIdentityAware(offered));
+        assertTrue(Files.exists(payload));
+        assertEquals(2, new CursorManager(cursorFile.toFile())
+                .get("app.device").fileIndex());
+        assertFalse(AcknowledgedWindowCleaner.hasBackendAcknowledgement(
+                dir.resolve("app"), "device", 1));
+    }
+
+    @Test
+    void restartAfterAckCleanupSkipsTombstoneAndUploadsNextWindow(
+            @TempDir Path dir) throws Exception {
+        Path first = gzWindow(
+                dir, "app", "device", 1,
+                "{\"type\":\"kernel_event\",\"name\":\"k1\"}\n");
+        metadata(dir, "app", "device", 1, first);
+        Path cursorFile = dir.resolve("cursor.json");
+        var cleanup = new LinkedBlockingQueue<Path>();
+        var publisher = new CapturingStreamPublisher();
+        var firstRun = new LogTailer(
+                dir.toFile(), "app", "device", "gpu-trace",
+                new CursorManager(cursorFile.toFile()), cleanup, null,
+                new StreamUploadSettings(true, 10, 1_000_000L));
+        var firstThread = startTailer(firstRun, publisher);
+
+        Path acknowledged = cleanup.poll(2, TimeUnit.SECONDS);
+        assertEquals(first, acknowledged);
+        assertTrue(AcknowledgedWindowCleaner.deleteIfIdentityAware(first));
+        firstThread.interrupt();
+        firstThread.join(2000);
+
+        // Recreate the crash-sensitive state: ACK+cleanup is durable, but the
+        // cursor update did not survive. The restart must skip sequence 1 via
+        // the ACK tombstone and continue with sequence 2.
+        new CursorManager(cursorFile.toFile()).update("app.device", 1, 0L);
+        Path second = gzWindow(
+                dir, "app", "device", 2,
+                "{\"type\":\"kernel_event\",\"name\":\"k2\"}\n");
+        WindowMetadata secondMetadata =
+                metadata(dir, "app", "device", 2, second);
+        var recovered = new CapturingStreamPublisher();
+        var secondThread = startTailer(
+                streamTailer(
+                    dir, "app", "device",
+                    new CursorManager(cursorFile.toFile())),
+                recovered);
+        awaitEvents(recovered.windows, 1, 3000);
+        secondThread.interrupt();
+        secondThread.join(2000);
+
+        assertEquals(1, recovered.windows.size());
+        assertEquals(secondMetadata.windowId(),
+                recovered.windows.get(0).windowId());
     }
 
     @Test

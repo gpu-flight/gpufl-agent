@@ -20,10 +20,43 @@ class AcknowledgedWindowCleanerTest {
         Files.write(payload, new byte[] {1, 2, 3});
         Path metadata = writeMetadata(
                 session, "session-a", "device", 1, payload.getFileName().toString());
+        recordAck(session, metadata);
 
         assertTrue(AcknowledgedWindowCleaner.deleteIfIdentityAware(payload));
         assertFalse(Files.exists(payload));
         assertTrue(Files.isRegularFile(metadata));
+    }
+
+    @Test
+    void identitySidecarWithoutBackendAckCannotAuthorizeDeletion(
+            @TempDir Path root) throws Exception {
+        Path session = Files.createDirectories(root.resolve("session-a"));
+        Path payload = session.resolve("device.1.log.gz");
+        Files.write(payload, new byte[] {1, 2, 3});
+        writeMetadata(
+                session, "session-a", "device", 1,
+                payload.getFileName().toString());
+
+        assertFalse(AcknowledgedWindowCleaner.deleteIfIdentityAware(payload));
+        assertTrue(Files.isRegularFile(payload));
+    }
+
+    @Test
+    void ackForDifferentWindowIdCannotAuthorizeDeletion(
+            @TempDir Path root) throws Exception {
+        Path session = Files.createDirectories(root.resolve("session-a"));
+        Path payload = session.resolve("device.1.log.gz");
+        Files.write(payload, new byte[] {1, 2, 3});
+        writeMetadata(
+                session, "session-a", "device", 1,
+                payload.getFileName().toString());
+        Files.writeString(
+                AcknowledgedWindowCleaner.acknowledgementPath(
+                    session, "device", 1),
+                "different-window-id\n");
+
+        assertFalse(AcknowledgedWindowCleaner.deleteIfIdentityAware(payload));
+        assertTrue(Files.isRegularFile(payload));
     }
 
     @Test
@@ -57,9 +90,10 @@ class AcknowledgedWindowCleanerTest {
         Path session = Files.createDirectories(root.resolve("session-a"));
         Path payload = session.resolve("device.1.log.gz");
         Files.write(payload, new byte[] {1});
-        writeMetadata(
+        Path metadata = writeMetadata(
                 session, "different-session", "device", 1,
                 payload.getFileName().toString());
+        recordAck(session, metadata);
 
         assertFalse(AcknowledgedWindowCleaner.deleteIfIdentityAware(payload));
         assertTrue(Files.isRegularFile(payload));
@@ -77,5 +111,13 @@ class AcknowledgedWindowCleanerTest {
                 ".gpufl-window." + channel + "." + sequence + ".json");
         Files.writeString(path, JsonSettings.MAPPER.writeValueAsString(metadata));
         return path;
+    }
+
+    private static void recordAck(Path session, Path metadata)
+            throws Exception {
+        WindowMetadata value = JsonSettings.MAPPER.readValue(
+                metadata.toFile(), WindowMetadata.class);
+        assertTrue(AcknowledgedWindowCleaner.recordBackendAcknowledgement(
+                session, value));
     }
 }

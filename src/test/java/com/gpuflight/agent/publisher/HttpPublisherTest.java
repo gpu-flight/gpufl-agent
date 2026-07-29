@@ -92,6 +92,14 @@ class HttpPublisherTest {
         return out.toByteArray();
     }
 
+    private static WindowMetadata windowMetadata(byte[] body) {
+        return new WindowMetadata(
+                1, "transport_window",
+                "10000000-0000-4000-8000-000000000001",
+                "session-1", "device", 1, 0, 1, 1,
+                "device.1.log.gz", body.length, 123);
+    }
+
     @Test
     void publish_sendsPostRequest() throws InterruptedException {
         HttpConfig config = new HttpConfig(hostUrl(), "v1", null, 5);
@@ -226,6 +234,42 @@ class HttpPublisherTest {
         boolean ok = pub.publishStreamGz("session-1", metadata, body);
 
         assertFalse(ok, "identity conflict must preserve the payload and cursor");
+    }
+
+    @Test
+    void publishWindow_oldBackend202AcceptsButCannotAuthorizeDeletion()
+            throws IOException {
+        statusToReturn.set(202);
+        responseBody.set(
+                "{\"accepted_for_processing\":true,\"spool_id\":\"legacy\"}");
+        HttpPublisher pub = new HttpPublisher(new HttpConfig(
+                hostUrl(), "v1", null, 5,
+                "stream", 100, 1_000_000L));
+        byte[] body = gzipBytes("{\"type\":\"kernel_event\"}\n");
+
+        WindowPublishResult result = pub.publishTransportWindow(
+                "session-1", windowMetadata(body), body);
+
+        assertTrue(result.accepted());
+        assertFalse(result.identityAcknowledged(),
+                "legacy 2xx must retain the local replayable payload");
+    }
+
+    @Test
+    void publishWindow_newBackendAckAuthorizesDeletion()
+            throws IOException {
+        statusToReturn.set(202);
+        responseBody.set("{\"window_acknowledged\":true}");
+        HttpPublisher pub = new HttpPublisher(new HttpConfig(
+                hostUrl(), "v1", null, 5,
+                "stream", 100, 1_000_000L));
+        byte[] body = gzipBytes("{\"type\":\"kernel_event\"}\n");
+
+        WindowPublishResult result = pub.publishTransportWindow(
+                "session-1", windowMetadata(body), body);
+
+        assertTrue(result.accepted());
+        assertTrue(result.identityAcknowledged());
     }
 
     @Test
