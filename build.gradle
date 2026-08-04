@@ -35,6 +35,10 @@ dependencies {
 
 tasks.withType(JavaCompile).configureEach {
     options.compilerArgs << '-parameters'
+    // The deployed 3090 host currently runs Java 21. Compile a Java-21
+    // compatible artifact even when local development uses the JDK 25
+    // toolchain; otherwise the fat JAR fails before Main can start.
+    options.release = 21
 }
 
 shadowJar {
