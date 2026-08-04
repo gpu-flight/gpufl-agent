@@ -54,9 +54,15 @@ public class TailerManager {
         this.topicPrefix = topicPrefix;
     }
 
-    public void spawnSessionTailers(DiscoveredSession session) {
+    /**
+     * Starts this session exactly once.
+     *
+     * @return {@code true} only when this invocation submitted the tailers; {@code false} when
+     *     an asynchronous watcher or a terminal-drain rescan had already started the session.
+     */
+    public boolean spawnSessionTailers(DiscoveredSession session) {
         String key = session.folder().getAbsolutePath() + "::" + session.sessionId();
-        if (!startedSessions.add(key)) return;
+        if (!startedSessions.add(key)) return false;
         log.info("Tailing session \"{}\" in {} types={}",
                 session.sessionId(), session.folder(), session.logTypes());
 
@@ -94,6 +100,7 @@ public class TailerManager {
                 }
             });
         }
+        return true;
     }
 
     /** Settle a finished session so a later scan skips it. A producer that closed

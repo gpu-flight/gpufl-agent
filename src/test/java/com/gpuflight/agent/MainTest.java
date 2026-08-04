@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -515,6 +516,30 @@ class MainTest {
         // An orphaned .tmp/ frozen well past the stale grace must not read as active.
         tmp.setLastModified(System.currentTimeMillis() - 120_000L); // 120s >> 30s grace
         assertFalse(GpuflAgent.anyActiveSession(List.of(folder), 0L));
+    }
+
+    @Test
+    void terminalRescanStartsAFinalSessionCreatedAfterInitialDiscovery(@TempDir Path root)
+            throws IOException {
+        Map<File, List<String>> folders = Map.of(root.toFile(), List.of("device"));
+        AtomicInteger started = new AtomicInteger();
+
+        assertFalse(GpuflAgent.discoverAndStartNewSessions(
+                folders, 0L, session -> {
+                    started.incrementAndGet();
+                    return true;
+                }));
+
+        Path finalSession = Files.createDirectories(root.resolve("final-rollover-session"));
+        Files.writeString(finalSession.resolve("device.1.log.gz"), "payload");
+
+        assertTrue(GpuflAgent.discoverAndStartNewSessions(
+                folders, 0L, session -> {
+                    assertEquals("final-rollover-session", session.sessionId());
+                    started.incrementAndGet();
+                    return true;
+                }));
+        assertEquals(1, started.get());
     }
 
     // ---- printUsage() — smoke test ----

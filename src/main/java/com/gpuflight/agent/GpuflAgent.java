@@ -30,6 +30,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 public class GpuflAgent {
 
@@ -98,23 +99,19 @@ public class GpuflAgent {
 
         // A launcher-spawned --upload agent uploads only sessions newer than sinceMs
         // (this run); a standalone agent (sinceMs == 0) uploads everything.
-        Consumer<DiscoveredSession> spawn = s -> {
+        Function<DiscoveredSession, Boolean> spawn = s -> {
             if (sinceMs > 0 && new File(s.folder(), s.sessionId()).lastModified() < sinceMs) {
-                return; // belongs to an earlier run - not ours to upload
+                return false; // belongs to an earlier run - not ours to upload
             }
-            tailerManager.spawnSessionTailers(s);
+            return tailerManager.spawnSessionTailers(s);
         };
 
         // Initial discovery + spawn
-        for (var entry : watchedFolders.entrySet()) {
-            for (DiscoveredSession s : SessionWatcher.discoverSources(entry.getKey(), entry.getValue())) {
-                spawn.accept(s);
-            }
-        }
+        discoverAndStartNewSessions(watchedFolders, sinceMs, spawn);
 
         // Start watchers
         for (var entry : watchedFolders.entrySet()) {
-            new SessionWatcher(entry.getKey(), entry.getValue(), spawn).start(executor);
+            new SessionWatcher(entry.getKey(), entry.getValue(), s -> spawn.apply(s)).start(executor);
         }
 
         LogArchiver archiver =
@@ -132,7 +129,7 @@ public class GpuflAgent {
                 return;
             }
             log.info("exit-when-drained mode enabled");
-            awaitDrainThenExit(watchedFolders.keySet(), tailerManager, sinceMs);
+            awaitDrainThenExit(watchedFolders, tailerManager, sinceMs, spawn);
             log.info("all sessions drained - exiting");
             shutdown();
             return;
@@ -202,10 +199,18 @@ public class GpuflAgent {
         }
     }
 
-    void awaitDrainThenExit(Collection<File> folders, TailerManager tailers, long sinceMs) {
+    void awaitDrainThenExit(
+            Map<File, List<String>> folders,
+            TailerManager tailers,
+            long sinceMs,
+            Function<DiscoveredSession, Boolean> spawn) {
         int clean = 0;
         while (true) {
             if (!Delays.sleep(Delays.DRAIN_CHECK_POLL)) break;
+            // The watcher is deliberately asynchronous. Before treating the source tree as
+            // drained, synchronously rescan it so a final rollover session that appeared
+            // between watcher polls is started before this launcher-owned agent exits.
+            boolean startedOnRescan = discoverAndStartNewSessions(folders, sinceMs, spawn);
             // Gate on "a session was discovered" (cumulative), not on observing the live
             // .tmp/ marker: a short trace finalizes that marker between our 1s polls, which
             // left the old sawActive gate spinning forever even after the upload drained.
@@ -215,10 +220,34 @@ public class GpuflAgent {
                         && ackCleanupInFlight.get() == 0);
             boolean idle = tailers.getActiveTailers().get() == 0
                     && cleanupIdle
-                    && !anyActiveSession(folders, sinceMs);
-            clean = (started && idle) ? clean + 1 : 0;
+                    && !anyActiveSession(folders.keySet(), sinceMs);
+            clean = (started && idle && !startedOnRescan) ? clean + 1 : 0;
             if (clean >= 2) return;
         }
+    }
+
+    /**
+     * Synchronous counterpart to {@link SessionWatcher}: used once at startup and again while
+     * deciding whether an {@code --exit-when-drained} agent may stop. The return value is true
+     * only when this pass actually starts a new tailer, not when it merely re-observes an active
+     * or already-settled session.
+     */
+    static boolean discoverAndStartNewSessions(
+            Map<File, List<String>> folders,
+            long sinceMs,
+            Function<DiscoveredSession, Boolean> spawn) {
+        boolean started = false;
+        for (var entry : folders.entrySet()) {
+            for (DiscoveredSession session : SessionWatcher.discoverSources(
+                    entry.getKey(), entry.getValue())) {
+                if (sinceMs > 0
+                        && new File(session.folder(), session.sessionId()).lastModified() < sinceMs) {
+                    continue;
+                }
+                started |= Boolean.TRUE.equals(spawn.apply(session));
+            }
+        }
+        return started;
     }
 
     static boolean anyActiveSession(Collection<File> folders, long sinceMs) {
