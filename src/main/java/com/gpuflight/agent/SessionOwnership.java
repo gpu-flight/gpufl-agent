@@ -1,5 +1,8 @@
 package com.gpuflight.agent;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -10,6 +13,8 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 /**
@@ -20,8 +25,12 @@ import java.util.stream.Stream;
  * is held; only orphan handling and session completion depend on this probe.
  */
 public final class SessionOwnership {
+    private static final Logger log =
+            LoggerFactory.getLogger(SessionOwnership.class);
     public static final String LOCK_FILE = ".gpufl-session.lock";
     public static final String LOSS_PREFIX = ".gpufl-transport-loss.";
+    private static final Set<Path> UNREADABLE_WARNED =
+            ConcurrentHashMap.newKeySet();
 
     public enum State {
         /** Another live process owns the session. */
@@ -36,21 +45,48 @@ public final class SessionOwnership {
 
     private SessionOwnership() {}
 
+    /**
+     * Probes with a shared lock on a read-only channel, so an agent running as
+     * another user needs only read access to the lock file. A shared lock
+     * still conflicts with the writer's exclusive one (fcntl on POSIX,
+     * LockFileEx on Windows).
+     */
     public static State probe(Path sessionDir) {
         Path path = sessionDir.resolve(LOCK_FILE);
         if (!Files.exists(path)) {
             return State.LEGACY_NO_LOCK;
         }
-        try (FileChannel channel = FileChannel.open(
-                path, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-            try (FileLock ignored = channel.tryLock()) {
+        FileChannel opened;
+        try {
+            opened = FileChannel.open(path, StandardOpenOption.READ);
+        } catch (IOException | RuntimeException unreadable) {
+            warnUnreadableOnce(sessionDir, path, unreadable);
+            return State.UNKNOWN;
+        }
+        try (FileChannel channel = opened) {
+            try (FileLock ignored = channel.tryLock(0L, Long.MAX_VALUE, true)) {
                 return ignored == null ? State.ACTIVE : State.UNOWNED;
             } catch (OverlappingFileLockException activeInThisJvm) {
                 return State.ACTIVE;
             }
-        } catch (IOException | RuntimeException unreadable) {
+        } catch (IOException | RuntimeException lockFailure) {
             return State.UNKNOWN;
         }
+    }
+
+    private static void warnUnreadableOnce(
+            Path sessionDir, Path lockPath, Exception cause) {
+        if (!UNREADABLE_WARNED.add(sessionDir.toAbsolutePath().normalize())) {
+            return;
+        }
+        log.warn("Cannot open session lock {} ({}); treating the session as "
+                        + "active. If the agent runs as another user, its "
+                        + "group needs read access to the lock file and write "
+                        + "access to the session directory (the agent writes "
+                        + "markers and tombstones and deletes payloads there). "
+                        + "Clients up to 1.3.0rc6 create the lock owner-only "
+                        + "and need chmod g+rw on it.",
+                lockPath, cause.toString());
     }
 
     public static boolean hasTransportLoss(Path sessionDir) {
