@@ -17,7 +17,7 @@ class LogSourceConfigTest {
     @Test
     void nullLogTypes_defaultsToAllChannels() {
         LogSourceConfig config = new LogSourceConfig("/logs", null);
-        assertEquals(List.of("device", "scope", "system", "sass", "serving"), config.logTypes());
+        assertEquals(List.of(), config.logTypes()); // no filter: every channel found
     }
 
     @Test

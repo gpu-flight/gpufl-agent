@@ -141,12 +141,13 @@ public class GpuflAgent {
 
     private void resolveWatchedFolders() {
         if (config.source() != null) {
-            log.info("Source folder: {} types={}", config.source().folder(), config.source().logTypes());
+            log.info("Source folder: {} types={}", config.source().folder(),
+                    describeLogTypes(config.source().logTypes()));
             watchedFolders.putIfAbsent(new File(config.source().folder()), config.source().logTypes());
         }
         if (config.sources() != null) {
             for (LogSourceConfig s : config.sources()) {
-                log.info("Source folder: {} types={}", s.folder(), s.logTypes());
+                log.info("Source folder: {} types={}", s.folder(), describeLogTypes(s.logTypes()));
                 watchedFolders.putIfAbsent(new File(s.folder()), s.logTypes());
             }
         }
@@ -161,6 +162,11 @@ public class GpuflAgent {
                 }
             }
         }
+    }
+
+    // An empty filter tails every channel found; say so rather than log "[]".
+    private static String describeLogTypes(List<String> logTypes) {
+        return logTypes.isEmpty() ? "all channels found" : String.join(",", logTypes);
     }
 
     private void shutdown() {

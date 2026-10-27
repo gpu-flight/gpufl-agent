@@ -26,13 +26,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.CRC32;
 import java.util.zip.GZIPOutputStream;
 
@@ -164,69 +163,133 @@ class TailerManagerTest {
         // The Python serving writer's layout: serving windows only, no native channel.
         Path sess = Files.createDirectories(root.resolve("serving-sess"));
         Files.createDirectories(sess.resolve(".tmp"));
-        byte[] gz = gzip("{\"type\":\"serving_request\",\"session_id\":\"serving-sess\"}\n");
-        Files.write(sess.resolve("serving.1.log.gz"), gz);
-        CRC32 crc = new CRC32();
-        crc.update(gz);
-        Files.writeString(sess.resolve(".gpufl-window.serving.1.json"),
-                JsonSettings.MAPPER.writeValueAsString(new WindowMetadata(
-                        1, "transport_window", "11111111-2222-4333-8444-555555555555",
-                        "serving-sess", "serving", 1, 10, 20, 30,
-                        "serving.1.log.gz", gz.length, crc.getValue())));
+        publishWindow(sess, "serving", 1);
         Path lock = Files.writeString(sess.resolve(SessionOwnership.LOCK_FILE), "");
 
-        // Fake backend: acknowledges the window identity and the completion signal.
-        List<String> channels = new CopyOnWriteArrayList<>();
-        AtomicInteger completions = new AtomicInteger();
-        CountDownLatch uploaded = new CountDownLatch(1);
-        HttpServer backend = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        backend.createContext("/api/v1/events/", exchange -> {
-            exchange.getRequestBody().readAllBytes();
-            String path = exchange.getRequestURI().getPath();
-            String body = "{}";
-            if (path.endsWith("/stream")) {
-                channels.add(exchange.getRequestHeaders().getFirst("X-GpuFlight-Window-Channel"));
-                body = "{\"window_acknowledged\":true}";
-                uploaded.countDown();
-            } else if (path.endsWith("/session-complete")) {
-                completions.incrementAndGet();
-            }
-            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, bytes.length);
-            exchange.getResponseBody().write(bytes);
-            exchange.close();
-        });
-        backend.start();
-        try {
-            HttpConfig http = new HttpConfig(
-                    "http://127.0.0.1:" + backend.getAddress().getPort(), "v1", null, 5);
+        try (FakeBackend backend = new FakeBackend()) {
             ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor();
-            TailerManager manager = new TailerManager(ex, new HttpPublisher(http),
-                    new CursorManager(new File(root.toFile(), "cursor.json")),
-                    new LinkedBlockingQueue<>(), null, StreamUploadSettings.from(http),
-                    "gpu-trace");
+            TailerManager manager = backend.managerIn(ex, root);
 
             try (FileChannel writer = FileChannel.open(
                     lock, StandardOpenOption.READ, StandardOpenOption.WRITE);
                  FileLock ignored = writer.lock()) {
-                List<DiscoveredSession> found = SessionWatcher.discoverSources(
-                        root.toFile(), ConfigLoader.DEFAULT_LOG_TYPES);
-                assertEquals(List.of("serving-sess"),
-                        found.stream().map(DiscoveredSession::sessionId).toList());
-                manager.spawnSessionTailers(found.get(0));
+                // No configuration: the serving channel is found, not listed.
+                manager.spawnSessionTailers(discoverOnly(root));
 
                 // A finished window uploads while the writer still holds the lock...
-                assertTrue(uploaded.await(10, TimeUnit.SECONDS), "serving window not uploaded");
-                assertEquals(List.of("serving"), channels);
-                assertEquals(0, completions.get());
+                backend.awaitEvent("serving");
+                assertEquals(List.of("serving"), backend.events);
                 Files.delete(sess.resolve(".tmp"));
             }
             // ...and the session completes once the writer releases it.
             runToCompletion(ex);
-            assertEquals(1, completions.get());
+            assertEquals(List.of("serving", COMPLETE), backend.events);
             assertTrue(new File(sess.toFile(), SessionWatcher.UPLOADED_MARKER).exists());
-        } finally {
-            backend.stop(0);
+        }
+    }
+
+    @Test
+    void bareApplicationLogIsNeverUploadedOrTakenForAChannel(@TempDir Path root)
+            throws Exception {
+        // An application log next to the windows can hold prompts. It has no sidecar,
+        // so it is no channel, and a directory holding only such logs is no session.
+        String prompt = "{\"type\":\"request\",\"prompt\":\"do not upload\"}\n";
+        Path sess = Files.createDirectories(root.resolve("serving-sess"));
+        publishWindow(sess, "serving", 1);
+        Files.writeString(sess.resolve("server.log"), prompt);
+        Files.writeString(sess.resolve("server.1.log"), prompt);
+        Path appOnly = Files.createDirectories(root.resolve("app-only"));
+        Files.writeString(appOnly.resolve("server.log"), prompt);
+
+        try (FakeBackend backend = new FakeBackend()) {
+            ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor();
+            TailerManager manager = backend.managerIn(ex, root);
+            DiscoveredSession found = discoverOnly(root);
+            assertEquals("serving-sess", found.sessionId());
+            assertEquals(List.of("serving"), found.logTypes());
+            manager.spawnSessionTailers(found);
+            runToCompletion(ex);
+
+            assertEquals(List.of("serving", COMPLETE), backend.events);
+            assertFalse(new File(appOnly.toFile(), SessionWatcher.UPLOADED_MARKER).exists());
+        }
+    }
+
+    @Test
+    void nativeSessionUploadsExactlyItsFourChannels(@TempDir Path root) throws Exception {
+        Path sess = Files.createDirectories(root.resolve("native-sess"));
+        for (String channel : List.of("device", "scope", "system", "sass")) {
+            publishWindow(sess, channel, 1);
+        }
+
+        try (FakeBackend backend = new FakeBackend()) {
+            uploadWithNoConfiguration(backend, root);
+            assertEquals(List.of("device", "sass", "scope", "system"), backend.windows());
+            assertEquals(1, backend.completions());
+        }
+    }
+
+    @Test
+    void unknownProducerChannelUploadsWithNoConfiguration(@TempDir Path root)
+            throws Exception {
+        Path sess = Files.createDirectories(root.resolve("foo-sess"));
+        publishWindow(sess, "foo", 1);
+        publishWindow(sess, "foo", 2);
+
+        try (FakeBackend backend = new FakeBackend()) {
+            uploadWithNoConfiguration(backend, root);
+            assertEquals(List.of("foo", "foo", COMPLETE), backend.events);
+        }
+    }
+
+    @Test
+    void channelsPublishedLateAreUploadedBeforeCompletion(@TempDir Path root)
+            throws Exception {
+        Path sess = Files.createDirectories(root.resolve("late-sess"));
+        Files.createDirectories(sess.resolve(".tmp"));
+        publishWindow(sess, "serving", 1);
+        Path lock = Files.writeString(sess.resolve(SessionOwnership.LOCK_FILE), "");
+
+        try (FakeBackend backend = new FakeBackend()) {
+            ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor();
+            TailerManager manager = backend.managerIn(ex, root);
+            try (FileChannel writer = FileChannel.open(
+                    lock, StandardOpenOption.READ, StandardOpenOption.WRITE);
+                 FileLock ignored = writer.lock()) {
+                assertTrue(manager.spawnSessionTailers(discoverOnly(root)));
+                backend.awaitEvent("serving");
+
+                // A channel's first window published while the session is live: the
+                // next scan gives it a tailer.
+                publishWindow(sess, "foo", 1);
+                assertTrue(manager.spawnSessionTailers(discoverOnly(root)));
+                backend.awaitEvent("foo");
+                assertFalse(manager.spawnSessionTailers(discoverOnly(root)));
+
+                // One published just before the producer finishes, with no scan after it.
+                publishWindow(sess, "bar", 1);
+                Files.delete(sess.resolve(".tmp"));
+            }
+            awaitUploaded(sess);
+            runToCompletion(ex);
+            assertEquals(List.of("serving", "foo", "bar", COMPLETE), backend.events);
+        }
+    }
+
+    @Test
+    void sessionOverTheChannelCapIsNeverReportedComplete(@TempDir Path root)
+            throws Exception {
+        Path sess = Files.createDirectories(root.resolve("broken-sess"));
+        for (int i = 0; i <= SessionWatcher.MAX_CHANNELS_PER_SESSION; i++) {
+            publishWindow(sess, "ch" + (char) ('a' + i), 1);
+        }
+
+        try (FakeBackend backend = new FakeBackend()) {
+            uploadWithNoConfiguration(backend, root);
+            assertEquals(SessionWatcher.MAX_CHANNELS_PER_SESSION, backend.windows().size());
+            assertEquals(0, backend.completions());
+            assertTrue(new File(sess.toFile(), SessionWatcher.FAILED_MARKER).exists());
+            assertTrue(Files.exists(sess.resolve("chq.1.log.gz")), "unsent window was removed");
         }
     }
 
@@ -234,8 +297,7 @@ class TailerManagerTest {
     void agentNotTailingServingNeverAdoptsServingOnlySession(@TempDir Path root)
             throws Exception {
         Path sess = Files.createDirectories(root.resolve("serving-sess"));
-        Files.write(sess.resolve("serving.1.log.gz"), gzip("{\"type\":\"serving_request\"}\n"));
-        Files.writeString(sess.resolve(".gpufl-window.serving.1.json"), "{}");
+        publishWindow(sess, "serving", 1);
 
         CompletionPublisher publisher = new CompletionPublisher();
         ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor();
@@ -250,6 +312,101 @@ class TailerManagerTest {
         assertFalse(manager.hasStartedAnySession());
         assertEquals(0, publisher.completionSignals);
         assertFalse(new File(sess.toFile(), SessionWatcher.UPLOADED_MARKER).exists());
+    }
+
+    private static final String COMPLETE = "session-complete";
+
+    /** Fake backend: acknowledges every window identity and records, in arrival order,
+     *  each window's channel and each session-complete signal. */
+    private static final class FakeBackend implements AutoCloseable {
+        final List<String> events = new CopyOnWriteArrayList<>();
+        private final HttpServer server;
+
+        FakeBackend() throws IOException {
+            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.createContext("/api/v1/events/", exchange -> {
+                exchange.getRequestBody().readAllBytes();
+                String path = exchange.getRequestURI().getPath();
+                String body = "{}";
+                if (path.endsWith("/stream")) {
+                    String channel = exchange.getRequestHeaders()
+                            .getFirst("X-GpuFlight-Window-Channel");
+                    events.add(channel == null ? "batch-without-window-identity" : channel);
+                    body = "{\"window_acknowledged\":true}";
+                } else if (path.endsWith("/session-complete")) {
+                    events.add(COMPLETE);
+                }
+                byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+                exchange.close();
+            });
+            server.start();
+        }
+
+        TailerManager managerIn(ExecutorService ex, Path root) {
+            HttpConfig http = new HttpConfig(
+                    "http://127.0.0.1:" + server.getAddress().getPort(), "v1", null, 5);
+            return new TailerManager(ex, new HttpPublisher(http),
+                    new CursorManager(new File(root.toFile(), "cursor.json")),
+                    new LinkedBlockingQueue<>(), null, StreamUploadSettings.from(http),
+                    "gpu-trace");
+        }
+
+        List<String> windows() {
+            return events.stream().filter(e -> !COMPLETE.equals(e)).sorted().toList();
+        }
+
+        long completions() {
+            return events.stream().filter(COMPLETE::equals).count();
+        }
+
+        void awaitEvent(String event) throws InterruptedException {
+            for (int i = 0; i < 100 && !events.contains(event); i++) Thread.sleep(100);
+            assertTrue(events.contains(event), event + " not received");
+        }
+
+        @Override
+        public void close() {
+            server.stop(0);
+        }
+    }
+
+    // A producer's window: its sidecar first, then the gzip payload the sidecar describes.
+    private static void publishWindow(Path sess, String channel, int sequence)
+            throws IOException {
+        String sid = sess.getFileName().toString();
+        byte[] gz = gzip("{\"type\":\"" + channel + "_record\",\"session_id\":\"" + sid + "\"}\n");
+        CRC32 crc = new CRC32();
+        crc.update(gz);
+        String payload = channel + "." + sequence + ".log.gz";
+        Files.writeString(sess.resolve(".gpufl-window." + channel + "." + sequence + ".json"),
+                JsonSettings.MAPPER.writeValueAsString(new WindowMetadata(
+                        1, "transport_window", UUID.randomUUID().toString(), sid, channel,
+                        sequence, 10, 20, 30, payload, gz.length, crc.getValue())));
+        Files.write(sess.resolve(payload), gz);
+    }
+
+    private static DiscoveredSession discoverOnly(Path root) {
+        List<DiscoveredSession> found = SessionWatcher.discoverSources(
+                root.toFile(), ConfigLoader.DEFAULT_LOG_TYPES);
+        assertEquals(1, found.size());
+        return found.get(0);
+    }
+
+    // Discovers and tails the one session under root as an agent with no --log-types.
+    private static void uploadWithNoConfiguration(FakeBackend backend, Path root)
+            throws InterruptedException {
+        ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor();
+        backend.managerIn(ex, root).spawnSessionTailers(discoverOnly(root));
+        runToCompletion(ex);
+    }
+
+    // Waits with the executor still open, since completing may start a late tailer.
+    private static void awaitUploaded(Path sess) throws InterruptedException {
+        Path marker = sess.resolve(SessionWatcher.UPLOADED_MARKER);
+        for (int i = 0; i < 300 && !Files.exists(marker); i++) Thread.sleep(100);
+        assertTrue(Files.exists(marker), "session not settled");
     }
 
     private static byte[] gzip(String text) throws IOException {
