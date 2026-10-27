@@ -1,6 +1,25 @@
 # gpufl-agent
 
-Uploads the session logs that gpufl-client writes to the GPUFlight backend.
+Uploads the session logs that gpufl-client, the gpufl-serving session writer
+or any other producer writes to the GPUFlight backend.
+
+## Channels
+
+The agent uploads every channel it finds in a session directory: a channel is
+a name with a published window sidecar (`.gpufl-window.<channel>.<N>.json`), so
+a new producer or channel needs no agent change. A bare `*.log` file, such as
+an application's `server.log`, is never a channel and is never uploaded. The
+native channels `device`, `scope`, `system` and `sass` are also recognized by
+their bare window files, for clients that predate sidecars. A session may have
+at most 16 channels.
+
+`--log-types=<a,b,...>` (`GPUFL_LOG_TYPES`, or `logTypes` in a config file) is
+an optional filter: only those channels are uploaded, and a directory without
+any of them is left alone.
+
+[docs/session-layout.md](docs/session-layout.md) is the layout contract a
+producer writes: session directories, the lock file, `.tmp/`, window files and
+sidecars, ACK tombstones and markers.
 
 ## Running the agent as a separate user
 
