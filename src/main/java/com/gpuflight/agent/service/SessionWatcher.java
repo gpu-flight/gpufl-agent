@@ -13,21 +13,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class SessionWatcher {
 
     private static final Logger log = LoggerFactory.getLogger(SessionWatcher.class);
-
-    // Derived from the known channels, so a directory holding only serving windows
-    // (the Python serving writer's sessions) is discovered like a native one.
-    private static final String CHANNELS = String.join("|", ConfigLoader.DEFAULT_LOG_TYPES);
-    private static final Pattern CHANNEL_FILE_PATTERN =
-            Pattern.compile("^(" + CHANNELS + ")(?:\\.\\d+)?\\.log(?:\\.gz)?$");
-    private static final Pattern WINDOW_TOMBSTONE_PATTERN =
-            Pattern.compile("^\\.gpufl-window\\."
-                    + "(" + CHANNELS + ")\\.[1-9][0-9]*\\.json$");
 
     /** Marker file the agent drops in a session dir once every channel has been
      *  fully uploaded. Discovery skips a session that has it, so a re-scan never
@@ -74,6 +66,16 @@ public class SessionWatcher {
 
         List<String> types = (logTypes == null || logTypes.isEmpty()) ? ConfigLoader.DEFAULT_LOG_TYPES : logTypes;
 
+        // Recognize a session only by a channel this agent tails. Adopting a directory
+        // whose channels all go untailed (a serving-only session under
+        // --log-types=device,scope,system,sass) would complete and mark it .uploaded
+        // with its windows never sent, so a later agent that does tail them skips it.
+        String channels = types.stream().map(Pattern::quote).collect(Collectors.joining("|"));
+        Pattern channelFile =
+                Pattern.compile("^(" + channels + ")(?:\\.\\d+)?\\.log(?:\\.gz)?$");
+        Pattern windowTombstone =
+                Pattern.compile("^\\.gpufl-window\\.(" + channels + ")\\.[1-9][0-9]*\\.json$");
+
         // Legacy-format warning
         Pattern legacyTop = Pattern.compile(
                 "^(.+)\\.(device|scope|system|sass)(?:\\.\\d+)?\\.log(?:\\.gz)?$");
@@ -100,7 +102,7 @@ public class SessionWatcher {
 
         for (File subdir : subdirs) {
             if (subdir.getName().startsWith(".")) continue;
-            if (looksLikeSession(subdir)) {
+            if (looksLikeSession(subdir, channelFile, windowTombstone)) {
                 // Flat: <folder>/<session_id>/ - embedded gpufl and single-pass
                 // `gpufl trace` write the session directly under the watched dir.
                 if (!isSettled(subdir)) {
@@ -116,7 +118,7 @@ public class SessionWatcher {
             Arrays.sort(grandchildren, Comparator.comparing(File::getName));
             for (File leaf : grandchildren) {
                 if (leaf.getName().startsWith(".")) continue;
-                if (looksLikeSession(leaf) && !isSettled(leaf)) {
+                if (looksLikeSession(leaf, channelFile, windowTombstone) && !isSettled(leaf)) {
                     result.add(new DiscoveredSession(subdir, leaf.getName(), types));
                 }
             }
@@ -131,15 +133,16 @@ public class SessionWatcher {
                 || new File(sessionDir, FAILED_MARKER).exists();
     }
 
-    // A directory is a session if it directly contains a known channel's log file
+    // A directory is a session if it directly contains a tailed channel's log file
     // (<channel>[.N].log[.gz]) or window tombstone.
-    private static boolean looksLikeSession(File dir) {
+    private static boolean looksLikeSession(
+            File dir, Pattern channelFile, Pattern windowTombstone) {
         File[] inside = dir.listFiles();
         if (inside == null) return false;
         for (File child : inside) {
             if (child.isFile() &&
-                    (CHANNEL_FILE_PATTERN.matcher(child.getName()).matches()
-                    || WINDOW_TOMBSTONE_PATTERN.matcher(
+                    (channelFile.matcher(child.getName()).matches()
+                    || windowTombstone.matcher(
                             child.getName()).matches())) {
                 return true;
             }

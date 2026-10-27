@@ -230,6 +230,28 @@ class TailerManagerTest {
         }
     }
 
+    @Test
+    void agentNotTailingServingNeverAdoptsServingOnlySession(@TempDir Path root)
+            throws Exception {
+        Path sess = Files.createDirectories(root.resolve("serving-sess"));
+        Files.write(sess.resolve("serving.1.log.gz"), gzip("{\"type\":\"serving_request\"}\n"));
+        Files.writeString(sess.resolve(".gpufl-window.serving.1.json"), "{}");
+
+        CompletionPublisher publisher = new CompletionPublisher();
+        ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor();
+        TailerManager manager = streamManagerIn(ex, root, publisher);
+        // The launcher's log types today: native channels only.
+        for (DiscoveredSession s : SessionWatcher.discoverSources(
+                root.toFile(), List.of("device", "scope", "system", "sass"))) {
+            manager.spawnSessionTailers(s);
+        }
+        runToCompletion(ex);
+
+        assertFalse(manager.hasStartedAnySession());
+        assertEquals(0, publisher.completionSignals);
+        assertFalse(new File(sess.toFile(), SessionWatcher.UPLOADED_MARKER).exists());
+    }
+
     private static byte[] gzip(String text) throws IOException {
         var out = new ByteArrayOutputStream();
         try (var gz = new GZIPOutputStream(out)) {

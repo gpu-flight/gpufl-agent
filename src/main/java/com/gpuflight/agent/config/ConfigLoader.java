@@ -17,9 +17,9 @@ public class ConfigLoader {
 
     private static final Logger log = LoggerFactory.getLogger(ConfigLoader.class);
 
-    /** Every channel the agent knows; discovery recognizes a session directory by any
-     *  of them. "serving" carries the records the Python serving writer emits, and its
-     *  session directories hold no native channel at all. */
+    /** Every channel the agent knows, tailed when none are configured. "serving" carries
+     *  the records the Python serving writer emits, and its session directories hold no
+     *  native channel at all. */
     public static final List<String> DEFAULT_LOG_TYPES =
             List.of("device", "scope", "system", "sass", "serving");
 
