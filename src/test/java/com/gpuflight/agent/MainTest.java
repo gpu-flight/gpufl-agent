@@ -99,7 +99,7 @@ class MainTest {
 
     @Test
     void logTypesOrDefault_usesDefaultWhenAbsent() {
-        assertEquals(List.of("device", "scope", "system", "sass"),
+        assertEquals(List.of("device", "scope", "system", "sass", "serving"),
             ConfigLoader.logTypesOrDefault(new String[]{}, Collections.emptyMap()));
     }
 

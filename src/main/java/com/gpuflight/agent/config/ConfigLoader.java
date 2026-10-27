@@ -17,7 +17,11 @@ public class ConfigLoader {
 
     private static final Logger log = LoggerFactory.getLogger(ConfigLoader.class);
 
-    public static final List<String> DEFAULT_LOG_TYPES = List.of("device", "scope", "system", "sass");
+    /** Every channel the agent knows; discovery recognizes a session directory by any
+     *  of them. "serving" carries the records the Python serving writer emits, and its
+     *  session directories hold no native channel at all. */
+    public static final List<String> DEFAULT_LOG_TYPES =
+            List.of("device", "scope", "system", "sass", "serving");
 
     public static AgentConfig load(String[] args) {
         String configPath = parseConfigArg(args);
@@ -239,7 +243,7 @@ public class ConfigLoader {
             Source (at least one of --folder or --folders is required):
               --folder=<path>              Log folder path          [GPUFL_SOURCE_FOLDER]
               --folders=<p1,p2,...>        Auto-discover folders    [GPUFL_SOURCE_FOLDERS]
-              --log-types=<a,b,...>        Log channels to tail     [GPUFL_LOG_TYPES]      default: device,scope,system,sass
+              --log-types=<a,b,...>        Log channels to tail     [GPUFL_LOG_TYPES]      default: device,scope,system,sass,serving
               --cursor-file=<path>         Cursor state file        [GPUFL_CURSOR_FILE]    default: ./cursor.json
 
             Publisher (required):

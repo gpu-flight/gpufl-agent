@@ -1,22 +1,40 @@
 package com.gpuflight.agent.service;
 
 import com.gpuflight.agent.CursorManager;
+import com.gpuflight.agent.SessionOwnership;
+import com.gpuflight.agent.config.ConfigLoader;
+import com.gpuflight.agent.config.HttpConfig;
+import com.gpuflight.agent.config.JsonSettings;
 import com.gpuflight.agent.config.StreamUploadSettings;
 import com.gpuflight.agent.model.DiscoveredSession;
 import com.gpuflight.agent.model.LogWrapper;
+import com.gpuflight.agent.model.WindowMetadata;
+import com.gpuflight.agent.publisher.HttpPublisher;
 import com.gpuflight.agent.publisher.Publisher;
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.CRC32;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -138,5 +156,85 @@ class TailerManagerTest {
         assertEquals(0, publisher.completionSignals);
         assertTrue(new File(sess, SessionWatcher.FAILED_MARKER).exists());
         assertFalse(new File(sess, SessionWatcher.UPLOADED_MARKER).exists());
+    }
+
+    @Test
+    void servingOnlySessionUploadsAndCompletesOnceItsLockIsReleased(
+            @TempDir Path root) throws Exception {
+        // The Python serving writer's layout: serving windows only, no native channel.
+        Path sess = Files.createDirectories(root.resolve("serving-sess"));
+        Files.createDirectories(sess.resolve(".tmp"));
+        byte[] gz = gzip("{\"type\":\"serving_request\",\"session_id\":\"serving-sess\"}\n");
+        Files.write(sess.resolve("serving.1.log.gz"), gz);
+        CRC32 crc = new CRC32();
+        crc.update(gz);
+        Files.writeString(sess.resolve(".gpufl-window.serving.1.json"),
+                JsonSettings.MAPPER.writeValueAsString(new WindowMetadata(
+                        1, "transport_window", "11111111-2222-4333-8444-555555555555",
+                        "serving-sess", "serving", 1, 10, 20, 30,
+                        "serving.1.log.gz", gz.length, crc.getValue())));
+        Path lock = Files.writeString(sess.resolve(SessionOwnership.LOCK_FILE), "");
+
+        // Fake backend: acknowledges the window identity and the completion signal.
+        List<String> channels = new CopyOnWriteArrayList<>();
+        AtomicInteger completions = new AtomicInteger();
+        CountDownLatch uploaded = new CountDownLatch(1);
+        HttpServer backend = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        backend.createContext("/api/v1/events/", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            String path = exchange.getRequestURI().getPath();
+            String body = "{}";
+            if (path.endsWith("/stream")) {
+                channels.add(exchange.getRequestHeaders().getFirst("X-GpuFlight-Window-Channel"));
+                body = "{\"window_acknowledged\":true}";
+                uploaded.countDown();
+            } else if (path.endsWith("/session-complete")) {
+                completions.incrementAndGet();
+            }
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        backend.start();
+        try {
+            HttpConfig http = new HttpConfig(
+                    "http://127.0.0.1:" + backend.getAddress().getPort(), "v1", null, 5);
+            ExecutorService ex = Executors.newVirtualThreadPerTaskExecutor();
+            TailerManager manager = new TailerManager(ex, new HttpPublisher(http),
+                    new CursorManager(new File(root.toFile(), "cursor.json")),
+                    new LinkedBlockingQueue<>(), null, StreamUploadSettings.from(http),
+                    "gpu-trace");
+
+            try (FileChannel writer = FileChannel.open(
+                    lock, StandardOpenOption.READ, StandardOpenOption.WRITE);
+                 FileLock ignored = writer.lock()) {
+                List<DiscoveredSession> found = SessionWatcher.discoverSources(
+                        root.toFile(), ConfigLoader.DEFAULT_LOG_TYPES);
+                assertEquals(List.of("serving-sess"),
+                        found.stream().map(DiscoveredSession::sessionId).toList());
+                manager.spawnSessionTailers(found.get(0));
+
+                // A finished window uploads while the writer still holds the lock...
+                assertTrue(uploaded.await(10, TimeUnit.SECONDS), "serving window not uploaded");
+                assertEquals(List.of("serving"), channels);
+                assertEquals(0, completions.get());
+                Files.delete(sess.resolve(".tmp"));
+            }
+            // ...and the session completes once the writer releases it.
+            runToCompletion(ex);
+            assertEquals(1, completions.get());
+            assertTrue(new File(sess.toFile(), SessionWatcher.UPLOADED_MARKER).exists());
+        } finally {
+            backend.stop(0);
+        }
+    }
+
+    private static byte[] gzip(String text) throws IOException {
+        var out = new ByteArrayOutputStream();
+        try (var gz = new GZIPOutputStream(out)) {
+            gz.write(text.getBytes(StandardCharsets.UTF_8));
+        }
+        return out.toByteArray();
     }
 }

@@ -20,11 +20,14 @@ public class SessionWatcher {
 
     private static final Logger log = LoggerFactory.getLogger(SessionWatcher.class);
 
+    // Derived from the known channels, so a directory holding only serving windows
+    // (the Python serving writer's sessions) is discovered like a native one.
+    private static final String CHANNELS = String.join("|", ConfigLoader.DEFAULT_LOG_TYPES);
     private static final Pattern CHANNEL_FILE_PATTERN =
-            Pattern.compile("^(device|scope|system|sass)(?:\\.\\d+)?\\.log(?:\\.gz)?$");
+            Pattern.compile("^(" + CHANNELS + ")(?:\\.\\d+)?\\.log(?:\\.gz)?$");
     private static final Pattern WINDOW_TOMBSTONE_PATTERN =
             Pattern.compile("^\\.gpufl-window\\."
-                    + "(device|scope|system|sass)\\.[1-9][0-9]*\\.json$");
+                    + "(" + CHANNELS + ")\\.[1-9][0-9]*\\.json$");
 
     /** Marker file the agent drops in a session dir once every channel has been
      *  fully uploaded. Discovery skips a session that has it, so a re-scan never
@@ -128,8 +131,8 @@ public class SessionWatcher {
                 || new File(sessionDir, FAILED_MARKER).exists();
     }
 
-    // A directory is a session if it directly contains a channel log file
-    // (device/scope/system/sass[.N].log[.gz]).
+    // A directory is a session if it directly contains a known channel's log file
+    // (<channel>[.N].log[.gz]) or window tombstone.
     private static boolean looksLikeSession(File dir) {
         File[] inside = dir.listFiles();
         if (inside == null) return false;

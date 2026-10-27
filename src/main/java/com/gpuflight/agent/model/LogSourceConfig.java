@@ -1,6 +1,7 @@
 package com.gpuflight.agent.model;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.gpuflight.agent.config.ConfigLoader;
 
 import java.util.List;
 
@@ -20,8 +21,9 @@ public record LogSourceConfig(
 ) {
     public LogSourceConfig {
         if (folder == null) folder = ".";
-        // "sass" carries the SASS-disassembly / source-content artifacts split
-        // out of device.log; tail it by default or they miss live upload.
-        if (logTypes == null || logTypes.isEmpty()) logTypes = List.of("device", "scope", "system", "sass");
+        // Tail every known channel by default: "sass" carries the SASS-disassembly /
+        // source-content artifacts split out of device.log, and "serving" the LLM-serving
+        // records; either would otherwise miss live upload.
+        if (logTypes == null || logTypes.isEmpty()) logTypes = ConfigLoader.DEFAULT_LOG_TYPES;
     }
 }
