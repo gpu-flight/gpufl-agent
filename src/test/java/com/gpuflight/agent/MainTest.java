@@ -98,8 +98,8 @@ class MainTest {
     }
 
     @Test
-    void logTypesOrDefault_usesDefaultWhenAbsent() {
-        assertEquals(List.of("device", "scope", "system", "sass"),
+    void logTypesOrDefault_isNoFilterWhenAbsent() {
+        assertEquals(List.of(),
             ConfigLoader.logTypesOrDefault(new String[]{}, Collections.emptyMap()));
     }
 

@@ -73,8 +73,8 @@ class SessionWatcherTest {
     void discoversSessionAfterAckCleanupLeavesOnlyWindowTombstone(
             @TempDir Path root) throws IOException {
         Path session = Files.createDirectories(root.resolve("acked-not-settled"));
-        Files.writeString(
-                session.resolve(".gpufl-window.device.1.json"), "{}");
+        Files.writeString(session.resolve(".gpufl-window.device.1.json"),
+                "{\"payload_bytes\":20,\"payload_crc32\":12345}");
 
         List<DiscoveredSession> found =
                 SessionWatcher.discoverSources(root.toFile(), TYPES);

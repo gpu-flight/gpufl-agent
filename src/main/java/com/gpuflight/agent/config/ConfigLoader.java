@@ -17,7 +17,10 @@ public class ConfigLoader {
 
     private static final Logger log = LoggerFactory.getLogger(ConfigLoader.class);
 
-    public static final List<String> DEFAULT_LOG_TYPES = List.of("device", "scope", "system", "sass");
+    /** No --log-types filter: every channel a producer publishes in a session is tailed,
+     *  so a new producer (the Python serving writer's "serving", or a channel this agent
+     *  has never heard of) needs no agent change. A list narrows that to its channels. */
+    public static final List<String> DEFAULT_LOG_TYPES = List.of();
 
     public static AgentConfig load(String[] args) {
         String configPath = parseConfigArg(args);
@@ -239,7 +242,7 @@ public class ConfigLoader {
             Source (at least one of --folder or --folders is required):
               --folder=<path>              Log folder path          [GPUFL_SOURCE_FOLDER]
               --folders=<p1,p2,...>        Auto-discover folders    [GPUFL_SOURCE_FOLDERS]
-              --log-types=<a,b,...>        Log channels to tail     [GPUFL_LOG_TYPES]      default: device,scope,system,sass
+              --log-types=<a,b,...>        Only tail these channels [GPUFL_LOG_TYPES]      default: every channel found
               --cursor-file=<path>         Cursor state file        [GPUFL_CURSOR_FILE]    default: ./cursor.json
 
             Publisher (required):
